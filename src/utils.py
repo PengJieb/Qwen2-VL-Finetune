@@ -51,7 +51,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         print('Loading Qwen2-VL from base model...')
         if "Qwen2.5" in model_base:
             model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-            assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']})
+            assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
+                           multilevel_qformer=gkwargs['multilevel_qformer'])
             assign_prefusion(model, gkwargs['n_prefusion_layers'])
         else:
             model = Qwen2VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)

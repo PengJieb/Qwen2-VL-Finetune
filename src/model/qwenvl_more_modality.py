@@ -2,7 +2,7 @@
 Author: PengJie pengjieb@mail.ustc.edu.cn
 Date: 2025-06-12 17:31:48
 LastEditors: PengJie pengjieb@mail.ustc.edu.cn
-LastEditTime: 2025-06-25 21:48:26
+LastEditTime: 2025-06-26 19:44:20
 FilePath: /Qwen2-VL-Finetune/src/model/qwenvl_more_modality.py
 Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 
@@ -110,11 +110,10 @@ class MultiLevelQFormerEncoder(nn.Module):
     def __init__(self, feature_size, num_patches, n_modality, embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, act_layer=nn.GELU):
         super().__init__()
         n_unite = num_patches // n_modality
-        n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
         # self.query_tokens = nn.Parameter(torch.randn(num_patches, embed_dim))
-        self.query_tokens = nn.ParameterDict({
-            f"query_tokens_{i}": nn.Parameter(torch.randn(n_patch_list[i], embed_dim)) for i in range(n_modality)
-        })
+        self.query_tokens = nn.Parameter(torch.randn(self.n_patch_list[-1], embed_dim))
+
 
         self.context_norm = nn.LayerNorm(feature_size)
         self.context_proj = nn.Linear(feature_size, embed_dim)
@@ -133,7 +132,7 @@ class MultiLevelQFormerEncoder(nn.Module):
         
         B, C, D = x.shape
         
-        query = self.query_tokens[f"query_tokens_{rank}"].unsqueeze(0).repeat(B, 1, 1)
+        query = self.query_tokens[:self.n_patch_list[rank]].unsqueeze(0).repeat(B, 1, 1)
         x = query + self.attn(self.norm1(query), x)
         x = x + self.mlp(self.norm2(x))
         return x
@@ -215,6 +214,32 @@ class Qwen2_5_VLProcessorOneToken(Qwen2_5_VLProcessor):
 
         return BatchFeature(data={**text_inputs, **image_inputs, **videos_inputs})
         
+def get_rank_order(input_tensor, descending=False):
+    """
+    Compute rank order for each row (along n_modality) in a tensor of shape (N, n_modality).
+    
+    Args:
+        input_tensor (torch.Tensor): Input tensor with shape (N, n_modality).
+        descending (bool): If True, rank from largest to smallest.
+    
+    Returns:
+        torch.Tensor: Rank tensor with shape (N, n_modality), where each row contains ranks for that sample's modalities.
+    """
+    # Get sorted indices along each row (dim=1)
+    sorted_indices = torch.argsort(input_tensor, dim=1, descending=descending)
+    
+    # Create a tensor of ranks (0 to n_modality-1) for each row
+    n_modality = input_tensor.shape[1]
+    ranks = torch.arange(n_modality, device=input_tensor.device).expand(input_tensor.shape[0], -1)
+    
+    # Initialize output tensor
+    rank_order = torch.empty_like(sorted_indices)
+    
+    # Scatter ranks into correct positions using advanced indexing
+    batch_indices = torch.arange(input_tensor.shape[0]).unsqueeze(1).expand(-1, n_modality)
+    rank_order[batch_indices, sorted_indices] = ranks
+    
+    return rank_order
 
 class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config, n_per_img = 16, modalities = ['image'], lazy_load = True,
@@ -321,49 +346,75 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 flow_embeds = flow_embeds.reshape(n_batch, -1, flow_embeds.shape[-1])
                 norm_embeds = norm_embeds.reshape(n_batch, -1, norm_embeds.shape[-1])
                 
-                compressed_image_embeds = self.m_qformer['image'](image_embeds)
-                compressed_depth_embeds = self.m_qformer['depth'](depth_embeds)
-                compressed_flow_embeds = self.m_qformer['flow'](flow_embeds)
-                compressed_norm_embeds = self.m_qformer['norm'](norm_embeds)
+                # compressed_image_embeds = self.m_qformer['image'](image_embeds)
+                # compressed_depth_embeds = self.m_qformer['depth'](depth_embeds)
+                # compressed_flow_embeds = self.m_qformer['flow'](flow_embeds)
+                # compressed_norm_embeds = self.m_qformer['norm'](norm_embeds)
                 # print(attention_mask)
                 if attention_mask is not None:
                     padding_mask = attention_mask.to(inputs_embeds.device)
                 else:
                     padding_mask = torch.ones(n_batch, 0).to(inputs_embeds.device).bool()
+                    
                 global_image_features_length = image_embeds.size(1) + depth_embeds.size(1) + flow_embeds.size(1) + norm_embeds.size(1)
-                compressed_global_image_features_length = compressed_image_embeds.size(1) + compressed_depth_embeds.size(1) + compressed_flow_embeds.size(1) + compressed_norm_embeds.size(1)
+                # compressed_global_image_features_length = compressed_image_embeds.size(1) + compressed_depth_embeds.size(1) + compressed_flow_embeds.size(1) + compressed_norm_embeds.size(1)
+                token_length_list = [image_embeds.size(1), depth_embeds.size(1), flow_embeds.size(1), norm_embeds.size(1), inputs_embeds.size(1)]
                 x = torch.cat([image_embeds, depth_embeds, flow_embeds, norm_embeds,
-                               compressed_image_embeds, compressed_depth_embeds, compressed_flow_embeds, compressed_norm_embeds,
                                inputs_embeds], dim=1)
-                # print(x.shape)
+                # print(x.shape) 
                 mask = torch.cat((torch.zeros((padding_mask.size(0),
-                                               global_image_features_length+compressed_global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
+                                               global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
                 # print(mask.shape)
                 prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
                 prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
                 
-                if getattr(self, "_use_flash_attention_2", False) or getattr(self.config, "_attn_implementation", "") == "flash_attention_2":
-                    prefusion_attention_mask=(~mask).int()
-                else: 
-                    prefusion_attention_mask=_prepare_4d_causal_attention_mask(~mask, (x.size(0), x.size(1)), x, 0)
+                
+                # if getattr(self, "_use_flash_attention_2", False) or getattr(self.config, "_attn_implementation", "") == "flash_attention_2":
+                #     prefusion_attention_mask =(~mask).int()
+                # else: 
+                # prefusion_attention_mask =_prepare_4d_causal_attention_mask(~mask, (x.size(0), x.size(1)), x, 0)
+                # Expanding 4d mask
+                seq_len = mask.size(1)
+                prefusion_attention_mask =(~mask).int()
+                prefusion_attention_mask = prefusion_attention_mask.unsqueeze(1)
+                prefusion_attention_mask = prefusion_attention_mask.unsqueeze(3)
+                prefusion_attention_mask = prefusion_attention_mask.expand(-1, -1, -1, seq_len)
 
                 if prefusion_position_ids.dim() == 2:
                     prefusion_position_ids = prefusion_position_ids[None, ...].expand(3, prefusion_position_ids.shape[0], -1)
                 prefusion_position_embeddings = self.model.rotary_emb(x, prefusion_position_ids)
-                if hasattr(self, 'prefusion'):
+                if hasattr(self, 'prefusion'): 
                     for layer in self.prefusion:
-                        x = layer(x,
-                                  attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,)[0]
-                        # print("Prefusion")
+                        lout = layer(x,
+                                  attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,
+                                  output_attentions=True)
+                        x = lout[0]
+                        prefusion_attn = lout[1]
+                        # print(prefusion_attn.shape)
+
+                prefusion_attn = prefusion_attn.sum(dim=-2).mean(dim=1) # batch size, seq_len
+                image_weight, depth_weight, flow_weight, norm_weight, text_weight = prefusion_attn.split(token_length_list, dim=1)
+                image_weight, depth_weight, flow_weight, norm_weight = image_weight.sum(-1, keepdim=True), depth_weight.sum(-1, keepdim=True), flow_weight.sum(-1, keepdim=True), norm_weight.sum(-1, keepdim=True)
+                modality_weight = torch.cat([image_weight, depth_weight, flow_weight, norm_weight], dim=1) # batch, n_modality
+                modality_rank = get_rank_order(modality_weight)
+                n_batch, n_modality = modality_rank.shape
+                llm_input_image_embeds = []
+                for bi in range(n_batch):
+                    image_rank, depth_rank, flow_rank, norm_rank = modality_rank[bi]
+                    compressed_image_embeds = self.m_qformer['image'](image_embeds[bi:bi+1], image_rank)
+                    compressed_depth_embeds = self.m_qformer['depth'](depth_embeds[bi:bi+1], depth_rank)
+                    compressed_flow_embeds = self.m_qformer['flow'](flow_embeds[bi:bi+1], flow_rank)
+                    compressed_norm_embeds = self.m_qformer['norm'](norm_embeds[bi:bi+1], norm_rank)
+                    llm_input_image_embeds.append(
+                        torch.cat([compressed_image_embeds, compressed_depth_embeds, compressed_flow_embeds, compressed_norm_embeds], dim=1)
+                    )
+                llm_input_image_embeds = torch.cat(llm_input_image_embeds, dim=0)
                 fusion_text_features = x[:, -1 *input_ids.size(1):,:]
-                compressed_image_features = x[:,-1*input_ids.size(1)-1*compressed_global_image_features_length:-1*input_ids.size(1),:]
+
                 fusion_text_features=fusion_text_features*(~padding_mask).unsqueeze(-1).int()+inputs_embeds*padding_mask.unsqueeze(-1)
-                # image_embeds = torch.cat([image_embeds, depth_embeds, flow_embeds, norm_embeds], dim=1)
-                # image_embeds = image_embeds.reshape(-1, image_embeds.shape[-1])
-                # print(compressed_image_features.shape)
-                # print(fusion_text_features.shape)
-                image_embeds = compressed_image_features
-                image_embeds = image_embeds.reshape(-1, image_embeds.shape[-1])
+
+
+                image_embeds = llm_input_image_embeds.reshape(-1, llm_input_image_embeds.shape[-1])
                 n_image_features = image_embeds.shape[0]
                 # print(n_image_features, n_image_tokens)
                 inputs_embeds = fusion_text_features
@@ -670,6 +721,9 @@ def assign_qformer(model: Qwen2_5_VLForConditionalGenerationMore, modalities, mu
     
     
 def assign_prefusion(model: Qwen2_5_VLForConditionalGenerationMore, n_prefusion_layers=3):
-    prefusion_layers=nn.ModuleList([Qwen2_5_VLDecoderLayer(model.config,layer_idx=i) for i in range(n_prefusion_layers)])
+    attn_type = model.config._attn_implementation
+    model.config._attn_implementation = 'eager'
     
+    prefusion_layers=nn.ModuleList([Qwen2_5_VLDecoderLayer(model.config,layer_idx=i) for i in range(n_prefusion_layers)])
+    model.config._attn_implementation = attn_type
     model.register_module("prefusion", prefusion_layers)

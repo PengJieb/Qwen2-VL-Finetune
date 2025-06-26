@@ -2,7 +2,7 @@
 Author: PengJie pengjieb@mail.ustc.edu.cn
 Date: 2025-06-12 22:39:55
 LastEditors: PengJie pengjieb@mail.ustc.edu.cn
-LastEditTime: 2025-06-19 18:49:21
+LastEditTime: 2025-06-26 20:31:04
 FilePath: /Qwen2-VL-Finetune/src/train/eval_sft.py
 Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 '''
@@ -82,7 +82,8 @@ def eva():
                                                 load_4bit= training_args.bits==4,load_8bit=training_args.bits==8,
                                                 device=training_args.device, use_flash_attn=not training_args.disable_flash_attn2,
                                                 n_image=model_args.n_image, n_depth=model_args.n_depth,
-                                                n_norm=model_args.n_norm, n_flow=model_args.n_flow, n_prefusion_layers=model_args.n_prefusion_layers
+                                                n_norm=model_args.n_norm, n_flow=model_args.n_flow, n_prefusion_layers=model_args.n_prefusion_layers,
+                                                multilevel_qformer=model_args.multilevel_qformer
                         )
 
     data_module = make_supervised_eval_data_module(model_id=model_args.model_id,
