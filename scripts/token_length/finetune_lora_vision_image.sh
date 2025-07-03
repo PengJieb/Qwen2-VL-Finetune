@@ -3,7 +3,7 @@
  # @Author: PengJie pengjieb@mail.ustc.edu.cn
  # @Date: 2025-06-12 19:23:24
  # @LastEditors: PengJie pengjieb@mail.ustc.edu.cn
- # @LastEditTime: 2025-06-25 21:22:00
+ # @LastEditTime: 2025-06-27 07:44:31
  # @FilePath: /Qwen2-VL-Finetune/scripts/finetune_lora_vision.sh
  # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 ### 
@@ -25,10 +25,10 @@ BATCH_PER_DEVICE=4
 NUM_DEVICES=4
 GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
 # 112, 80, 48, 16
-n_image=32 # 56 64/
-n_depth=32 # 40
-n_norm=32 # 24
-n_flow=32 # 8
+n_image=64 # 56 64/
+n_depth=64 # 40
+n_norm=64 # 24
+n_flow=64 # 8
 image_resolution=112
 out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_compression
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
