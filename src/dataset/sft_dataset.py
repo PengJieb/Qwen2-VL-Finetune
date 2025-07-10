@@ -1,10 +1,12 @@
 import copy
-import os
+import os, sys
+sys.path.append('/mnt/shared_workspace/pengjie/Qwen2-VL-Finetune')
+sys.path.append('/mnt/shared_workspace/pengjie/Qwen2-VL-Finetune/src/dataset')
 from typing import Dict
 import torch
 import transformers
 import ujson as json
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 from src.params import DataArguments
 from src.constants import (
@@ -15,8 +17,8 @@ from src.constants import (
     DEFAULT_VIDEO_TOKEN,
     SYSTEM_MESSAGE,
 )
-
-from .data_utils import get_image_info, get_video_info, llava_to_openai, pad_sequence
+from tqdm import tqdm
+from src.dataset.data_utils import get_image_info, get_video_info, llava_to_openai, pad_sequence
 
 
 
@@ -206,7 +208,7 @@ class SupervisedDatasetNextQA(Dataset):
             list_data_dict = json.load(open(data_path, "r"))
         else:
             list_data_dict = data_path
-        # list_data_dict = list_data_dict[:10]
+        # list_data_dict = list_data_dict[:100]
         self.model_id = model_id
         self.processor = processor
         self.list_data_dict = list_data_dict
@@ -232,6 +234,7 @@ class SupervisedDatasetNextQA(Dataset):
         is_video = False
         n_image = 0
         processor = self.processor
+        # print(sources['norm'][0])
         if "image" in sources:
             videos = None
             grid_key = "image_grid_thw"
@@ -310,7 +313,11 @@ class SupervisedDatasetNextQA(Dataset):
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
                         image_file = os.path.join(image_folder, image_file)
-                norm.append(get_image_info(image_file, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+                try:
+                    norm.append(get_image_info(image_file, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+                except:
+                    print(image_file, "XXXXXX")
+                    continue
 
             
         
@@ -763,3 +770,31 @@ def make_supervised_eval_data_module(model_id, processor, data_args):
     return dict(train_dataset=sft_dataset,
                 eval_dataset=None,
                 data_collator=data_collator)
+    
+    
+
+if __name__ == "__main__":
+    from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMore, assign_qformer, Qwen2_5_VLProcessorOneToken, assign_prefusion
+    data_config = DataArguments(
+        data_path = 'nextqa_subset/train.json',
+        image_folder = '.',
+        image_min_pixels = 256*28*28,
+        image_max_pixels=256*28*28,
+        image_resized_width=112,
+        image_resized_height=112,
+    )
+    
+    processor = Qwen2_5_VLProcessorOneToken.from_pretrained('Qwen/Qwen2.5-VL-3B-Instruct', 
+                                                            n_frames = 16*4)
+    data_collator = DataCollatorForSupervisedDataset(pad_token_id=processor.tokenizer.pad_token_id)
+    dataset = SupervisedDatasetNextQA(
+        'nextqa_subset/train.json',
+        processor,
+        data_config,
+        'Qwen/Qwen2.5-VL-3B-Instruct'
+    )
+    
+    dataloader = DataLoader(dataset, batch_size=16, num_workers=32, collate_fn=data_collator)
+    
+    for batch in tqdm(dataloader):
+        print(batch.keys())

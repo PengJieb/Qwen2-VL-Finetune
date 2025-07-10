@@ -3,7 +3,7 @@
  # @Author: PengJie pengjieb@mail.ustc.edu.cn
  # @Date: 2025-06-12 19:23:24
  # @LastEditors: PengJie pengjieb@mail.ustc.edu.cn
- # @LastEditTime: 2025-06-26 22:55:17
+ # @LastEditTime: 2025-07-09 22:00:49
  # @FilePath: /Qwen2-VL-Finetune/scripts/finetune_lora_vision.sh
  # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 ### 
@@ -15,24 +15,24 @@ MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 # MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 
 export PYTHONPATH=src:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=1,2,3,4
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+# export CUDA_VISIBLE_DEVICES=1
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
-export HF_ENDPOINT=https://hf-mirror.com
+# export HF_ENDPOINT=https://hf-mirror.com
 
 GLOBAL_BATCH_SIZE=16
 BATCH_PER_DEVICE=4
 NUM_DEVICES=4
 GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
 # 112, 80, 48, 16
-n_image=16 # 56 64/
-n_depth=16 # 40
-n_norm=16 # 24
-n_flow=16 # 8
+n_image=32 # 56 64/
+n_depth=32 # 40
+n_norm=32 # 24
+n_flow=32 # 8
 multilevel_qformer=True
 image_resolution=112
-out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic
+out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_128rank
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
 
@@ -42,13 +42,13 @@ deepspeed src/train/train_sft.py \
     --vision_lora True \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
-    --lora_rank 64 \
+    --lora_rank 128 \
     --lora_alpha 64 \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
     --deepspeed scripts/zero3.json \
     --model_id $MODEL_NAME \
-    --data_path nextqa_1k/train_subset_1k_qwen.json \
+    --data_path nextqa_subset/train.json \
     --image_folder . \
     --remove_unused_columns False \
     --freeze_vision_tower True \
@@ -58,7 +58,7 @@ deepspeed src/train/train_sft.py \
     --fp16 False \
     --disable_flash_attn2 False \
     --output_dir output/$out_dir \
-    --num_train_epochs 1 \
+    --num_train_epochs 2 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
     --image_min_pixels $((256 * 28 * 28)) \
@@ -75,7 +75,7 @@ deepspeed src/train/train_sft.py \
     --report_to tensorboard \
     --lazy_preprocess True \
     --save_strategy "steps" \
-    --save_steps 200 \
+    --save_steps 400 \
     --save_total_limit 10 \
     --dataloader_num_workers 4 \
     --n_image $n_image \
@@ -97,12 +97,12 @@ python src/train/eval_sft.py \
     --vision_lora True \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
-    --lora_rank 64 \
+    --lora_rank 128 \
     --lora_alpha 64 \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
     --model_id $MODEL_NAME \
-    --data_path nextqa_1k/val_1k_qwen.json \
+    --data_path nextqa_subset/val.json \
     --model_path output/$out_dir \
     --image_folder . \
     --remove_unused_columns False \

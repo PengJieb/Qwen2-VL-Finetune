@@ -172,3 +172,5 @@ testing.ipynb
 nextqa_1k/
 nextqa_1k*
 *.bin
+nextqa_subset/
+nextqa_subset*
