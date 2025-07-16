@@ -174,3 +174,6 @@ nextqa_1k*
 *.bin
 nextqa_subset/
 nextqa_subset*
+nextqa/
+nextqa*
+local_labels/*

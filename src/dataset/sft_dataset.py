@@ -7,7 +7,7 @@ import torch
 import transformers
 import ujson as json
 from torch.utils.data import Dataset, DataLoader
-
+import random
 from src.params import DataArguments
 from src.constants import (
     IGNORE_INDEX,
@@ -225,6 +225,7 @@ class SupervisedDatasetNextQA(Dataset):
         self.fps = data_args.fps
         # print("#"*40, type(self.processor))
 
+
     def __len__(self):
         return len(self.list_data_dict)
 
@@ -246,6 +247,11 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             images = []
+            
+            
+            image_files = random.sample(image_files, 4)
+            image_files.sort()
+            
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -283,6 +289,8 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             depth = []
+            image_files = random.sample(image_files, 4)
+            image_files.sort()
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -296,6 +304,8 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             flow = []
+            image_files = random.sample(image_files, 4)
+            image_files.sort()
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -309,6 +319,8 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             norm = []
+            image_files = random.sample(image_files, 4)
+            image_files.sort()
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -485,6 +497,17 @@ class SupervisedDatasetNextQAEval(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             images = []
+            
+            total_count = len(image_files)
+            sample_count = 4
+            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            indices = sorted(list(set(indices)))
+            saved_files = []
+            for i, file in enumerate(image_files):
+                if i in indices:
+                    saved_files.append(file)
+            image_files = saved_files
+            
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -522,6 +545,17 @@ class SupervisedDatasetNextQAEval(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             depth = []
+            
+            total_count = len(image_files)
+            sample_count = 4
+            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            indices = sorted(list(set(indices)))
+            saved_files = []
+            for i, file in enumerate(image_files):
+                if i in indices:
+                    saved_files.append(file)
+            image_files = saved_files
+            
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -535,6 +569,17 @@ class SupervisedDatasetNextQAEval(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             flow = []
+            
+            total_count = len(image_files)
+            sample_count = 4
+            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            indices = sorted(list(set(indices)))
+            saved_files = []
+            for i, file in enumerate(image_files):
+                if i in indices:
+                    saved_files.append(file)
+            image_files = saved_files
+            
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -548,6 +593,17 @@ class SupervisedDatasetNextQAEval(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             norm = []
+            
+            total_count = len(image_files)
+            sample_count = 4
+            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            indices = sorted(list(set(indices)))
+            saved_files = []
+            for i, file in enumerate(image_files):
+                if i in indices:
+                    saved_files.append(file)
+            image_files = saved_files
+            
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):

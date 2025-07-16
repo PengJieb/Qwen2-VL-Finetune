@@ -138,7 +138,7 @@ class MultiLevelQFormerEncoder(nn.Module):
         return x
 
 class Qwen2_5_VLProcessorOneToken(Qwen2_5_VLProcessor):
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, n_frames = 10, **kwargs):
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, n_frames = 4, **kwargs):
         super().__init__(image_processor, tokenizer, chat_template, **kwargs)
         self.n_frames = n_frames
         

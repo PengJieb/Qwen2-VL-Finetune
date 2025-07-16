@@ -15,8 +15,8 @@ MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 # MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 
 export PYTHONPATH=src:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=4,5,6,7
-# export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0,5,6,7
+# export CUDA_VISIBLE_DEVICES=2
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 # export HF_ENDPOINT=https://hf-mirror.com
@@ -25,14 +25,16 @@ GLOBAL_BATCH_SIZE=16
 BATCH_PER_DEVICE=4
 NUM_DEVICES=4
 GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
+PROJ_ROOT=$(pwd)
 # 112, 80, 48, 16
 n_image=32 # 56 64/
 n_depth=32 # 40
 n_norm=32 # 24
 n_flow=32 # 8
 multilevel_qformer=True
-image_resolution=112
-out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_128rank
+image_resolution=224
+out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy
+
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
 
@@ -42,13 +44,13 @@ deepspeed src/train/train_sft.py \
     --vision_lora True \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
-    --lora_rank 128 \
+    --lora_rank 64 \
     --lora_alpha 64 \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
     --deepspeed scripts/zero3.json \
     --model_id $MODEL_NAME \
-    --data_path nextqa_subset/train.json \
+    --data_path local_labels/train.json \
     --image_folder . \
     --remove_unused_columns False \
     --freeze_vision_tower True \
@@ -88,7 +90,7 @@ cd output/$out_dir
 highest_checkpoint=$(ls | grep '^checkpoint-' | sed 's/^checkpoint-//' | sort -nr | head -1)
 echo "Highest checkpoint: $highest_checkpoint"
 rm non_lora_state_dict.bin
-ln -s /mnt/shared_workspace/pengjie/Qwen2-VL-Finetune/output/$out_dir/checkpoint-$highest_checkpoint/non_lora_state_dict.bin non_lora_state_dict.bin
+ln -s $PROJ_ROOT/output/$out_dir/checkpoint-$highest_checkpoint/non_lora_state_dict.bin non_lora_state_dict.bin
 cd -
 
 python src/train/eval_sft.py \
@@ -97,12 +99,12 @@ python src/train/eval_sft.py \
     --vision_lora True \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
-    --lora_rank 128 \
+    --lora_rank 64 \
     --lora_alpha 64 \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
     --model_id $MODEL_NAME \
-    --data_path nextqa_subset/val.json \
+    --data_path local_labels/val.json \
     --model_path output/$out_dir \
     --image_folder . \
     --remove_unused_columns False \
