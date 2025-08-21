@@ -1,0 +1,26 @@
+{
+    // "include": [
+    //   "src",
+    //   "notebook"
+    // ],
+  
+    "exclude": [
+      "**/node_modules",
+      "**/__pycache__",
+      "src/experimental",
+      "src/typestubs",
+      "nextqa",
+      "output",
+      "irregular",
+      "local_labels"
+    ],
+  
+    "ignore": [
+      "src/oldstuff"
+    ],
+  
+    "defineConstant": {
+      "DEBUG": true
+    },
+    "reportArgumentType":"none",
+  }

@@ -1,12 +1,12 @@
 import os
 import torch
-from peft import LoraConfig
+from peft import LoraConfig, PeftModel
 import ast
 import pathlib
 from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
-
+from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMore, assign_qformer, Qwen2_5_VLProcessorOneToken, assign_prefusion, Qwen2_5_VLForConditionalGenerationMoreGRPO
 from src.trainer import QwenGRPOTrainer
-from src.dataset import make_grpo_data_module
+from src.dataset import make_grpo_data_module, make_grpo_nextqa_data_module
 from src.params import DataArguments, ModelArguments, GRPOArguments
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 from monkey_patch_forward import replace_qwen2_5_with_mixed_modality_forward, replace_qwen_2_with_mixed_modality_forward
@@ -112,13 +112,16 @@ def train():
         ))
 
     if "Qwen2.5" in model_args.model_id:
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(
             model_args.model_id,
             torch_dtype=compute_dtype,
             attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-            **bnb_model_from_pretrained_args
-        )
 
+        )
+        assign_qformer(model, {"image": model_args.n_image, 'depth': model_args.n_depth, 'norm': model_args.n_norm, 'flow': model_args.n_flow}, model_args.multilevel_qformer)
+        assign_prefusion(model, model_args.n_prefusion_layers)
+        if model_args.sft_model_path is not None:
+            model.from_pretrained(model_args.sft_model_path)
     else:
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_args.model_id,
@@ -157,8 +160,36 @@ def train():
                 model.to(torch.bfloat16)
             if training_args.fp16:
                 model.to(torch.float16)
+                
+        if not training_args.freeze_vision_tower:
+            for name, param in model.named_parameters():
+                if "visual" in name:
+                    param.requires_grad = True
 
-    processor = AutoProcessor.from_pretrained(model_args.model_id)
+        if not training_args.freeze_merger:
+            for name, param in model.named_parameters():
+                if "merger" in name:
+                    param.requires_grad = True
+    if model_args.sft_model_path is not None:
+        for name, param in model.named_parameters():
+            if 'prefusion' in name or 'm_qformer' in name:
+                param.requires_grad = False
+    else:
+        for name, param in model.named_parameters():
+            if 'prefusion' in name or 'm_qformer' in name:
+                param.requires_grad = True
+            
+    # for pn, p in model.named_parameters():
+    #     # if p.requires_grad:
+    #     print(pn, p.requires_grad, training_args.lora_enable)
+
+    processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_args.model_id, 
+                                                            n_frames = model_args.n_image+model_args.n_depth+model_args.n_norm+model_args.n_flow)
+    pad_token_id = processor.tokenizer.pad_token_id
+    processor.pad_token_id = pad_token_id
+    processor.eos_token_id = processor.tokenizer.eos_token_id
+
+
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
@@ -174,12 +205,13 @@ def train():
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    dataset_module = make_grpo_data_module(model_id=model_args.model_id,
+    dataset_module = make_grpo_nextqa_data_module(model_id=model_args.model_id,
                                               processor=processor,
                                               data_args=data_args)
 
     reward_funcs = load_reward_funcs("src.train.reward_funcs")
 
+    print(type(model))
     trainer = QwenGRPOTrainer(
         model=model,
         train_dataset=dataset_module["train_dataset"],
@@ -187,6 +219,7 @@ def train():
         reward_funcs=reward_funcs,
         args=training_args,
         peft_config=peft_config,
+        processing_class=processor
     )
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

@@ -10,6 +10,8 @@ from src.constants import (
     LLAVA_VIDEO_TOKEN,
     VISION_START_TOKEN,
     VISION_END_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IM_END_TOKEN
 )
 
 
@@ -19,7 +21,7 @@ def replace_image_tokens(input_string, is_video=False):
         replacement = VISION_START_TOKEN + DEFAULT_VIDEO_TOKEN + VISION_END_TOKEN
     else:
         pattern = r'\n?' + re.escape(LLAVA_IMAGE_TOKEN) + r'\n?'
-        replacement = VISION_START_TOKEN + DEFAULT_IMAGE_TOKEN + VISION_END_TOKEN
+        replacement = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
 
     return re.sub(pattern, replacement, input_string)
 

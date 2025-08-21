@@ -242,8 +242,9 @@ def get_rank_order(input_tensor, descending=False):
     return rank_order
 
 class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration):
-    def __init__(self, config, n_per_img = 16, modalities = ['image'], lazy_load = True,
-                 n_prefusion_layers = 3):
+    def __init__(self, config, eval_model=False,
+                 n_image=4, n_depth=4, n_norm=4, n_flow=4, multilevel_qformer=True,
+                 n_prefusion_layers=1):
         super().__init__(config)
         self.config = config
         # self.n_per_img = n_per_img
@@ -252,6 +253,11 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
         # if not lazy_load:
         #     assign_qformer(self, modalities, multilevel_qformer)
         #     assign_prefusion(self, n_prefusion_layers)
+        # print(n_image, n_depth, n_norm, n_flow, multilevel_qformer, n_prefusion_layers)
+        if eval_model:
+            assign_qformer(self, {"image": n_image, 'depth': n_depth, 'norm': n_norm, 'flow': n_flow},
+                           multilevel_qformer=multilevel_qformer)
+            assign_prefusion(self, n_prefusion_layers)
     
     @add_start_docstrings_to_model_forward(QWEN2_5_VL_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=Qwen2_5_VLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
@@ -337,7 +343,7 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 norm_embeds = self.visual(norm_values, grid_thw=norm_value_grid)
                 # print(image_embeds.shape, depth_embeds.shape, flow_embeds.shape, norm_embeds.shape)
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
-                
+                # print("n_image_tokens", n_image_tokens)
                 
                 n_batch = input_ids.shape[0]
                 
@@ -350,21 +356,22 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 # compressed_depth_embeds = self.m_qformer['depth'](depth_embeds)
                 # compressed_flow_embeds = self.m_qformer['flow'](flow_embeds)
                 # compressed_norm_embeds = self.m_qformer['norm'](norm_embeds)
-                # print(attention_mask)
+                # print(attention_mask.shape)
                 if attention_mask is not None:
                     padding_mask = attention_mask.to(inputs_embeds.device)
                 else:
                     padding_mask = torch.ones(n_batch, 0).to(inputs_embeds.device).bool()
-                    
+                    # attention_mask = (input_ids > -1000000).to(torch.long).to(inputs_embeds.device).bool()
+                non_fused_inputs_embeds = inputs_embeds
                 global_image_features_length = image_embeds.size(1) + depth_embeds.size(1) + flow_embeds.size(1) + norm_embeds.size(1)
                 # compressed_global_image_features_length = compressed_image_embeds.size(1) + compressed_depth_embeds.size(1) + compressed_flow_embeds.size(1) + compressed_norm_embeds.size(1)
                 token_length_list = [image_embeds.size(1), depth_embeds.size(1), flow_embeds.size(1), norm_embeds.size(1), inputs_embeds.size(1)]
                 x = torch.cat([image_embeds, depth_embeds, flow_embeds, norm_embeds,
                                inputs_embeds], dim=1)
-                # print(x.shape) 
+                # print(padding_mask.shape) 
                 mask = torch.cat((torch.zeros((padding_mask.size(0),
                                                global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
-                # print(mask.shape)
+                # print(mask.shape, global_image_features_length)
                 prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
                 prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
                 
@@ -391,7 +398,7 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                         x = lout[0]
                         prefusion_attn = lout[1]
                         # print(prefusion_attn.shape)
-
+                image_embeds, depth_embeds, flow_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
                 prefusion_attn = prefusion_attn.sum(dim=-2).mean(dim=1) # batch size, seq_len
                 image_weight, depth_weight, flow_weight, norm_weight, text_weight = prefusion_attn.split(token_length_list, dim=1)
                 image_weight, depth_weight, flow_weight, norm_weight = image_weight.sum(-1, keepdim=True), depth_weight.sum(-1, keepdim=True), flow_weight.sum(-1, keepdim=True), norm_weight.sum(-1, keepdim=True)
@@ -409,15 +416,16 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                         torch.cat([compressed_image_embeds, compressed_depth_embeds, compressed_flow_embeds, compressed_norm_embeds], dim=1)
                     )
                 llm_input_image_embeds = torch.cat(llm_input_image_embeds, dim=0)
-                fusion_text_features = x[:, -1 *input_ids.size(1):,:]
+                # fusion_text_features = x[:, -1 *input_ids.size(1):,:]
 
-                fusion_text_features=fusion_text_features*(~padding_mask).unsqueeze(-1).int()+inputs_embeds*padding_mask.unsqueeze(-1)
+                # fusion_text_features=fusion_text_features*(~padding_mask).unsqueeze(-1).int()+inputs_embeds*padding_mask.unsqueeze(-1)
 
 
                 image_embeds = llm_input_image_embeds.reshape(-1, llm_input_image_embeds.shape[-1])
                 n_image_features = image_embeds.shape[0]
                 # print(n_image_features, n_image_tokens)
-                inputs_embeds = fusion_text_features
+                # print(non_fused_inputs_embeds.shape, fusion_text_features.shape)
+                inputs_embeds = non_fused_inputs_embeds
                 # if n_image_tokens != n_image_features:
                 #     raise ValueError(
                 #         f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
@@ -429,6 +437,7 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 image_mask = mask_expanded.to(inputs_embeds.device)
                 # print(image_mask.shape)
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                # print(image_mask.shape, image_embeds.shape, input_ids.shape, inputs_embeds.shape, mask.sum())
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
             if pixel_values_videos is not None:
@@ -727,3 +736,13 @@ def assign_prefusion(model: Qwen2_5_VLForConditionalGenerationMore, n_prefusion_
     prefusion_layers=nn.ModuleList([Qwen2_5_VLDecoderLayer(model.config,layer_idx=i) for i in range(n_prefusion_layers)])
     model.config._attn_implementation = attn_type
     model.register_module("prefusion", prefusion_layers)
+    
+    
+class Qwen2_5_VLForConditionalGenerationMoreGRPO(Qwen2_5_VLForConditionalGenerationMore):
+    def __init__(self, config, eval_model=False,
+                 n_image=4, n_depth=4, n_norm=4, n_flow=4, multilevel_qformer=True,
+                 n_prefusion_layers=1):
+        super(Qwen2_5_VLForConditionalGenerationMoreGRPO).__init__(config, eval_model, n_image, n_depth, n_norm, n_flow, multilevel_qformer, n_prefusion_layers)
+        self.config._attn_implementation = 'flash_attention_2'
+        self._use_flash_attention_2 = True
+        

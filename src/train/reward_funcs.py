@@ -24,15 +24,21 @@ def accuracy_reward(completions, assistant, **kwargs):
             try:
                 # Extract answer from solution if it has think/answer tags
                 sol_match = re.search(r"<answer>(.*?)</answer>", sol)
-                ground_truth = sol_match.group(1).strip() if sol_match else sol.strip()
+                ground_truth = sol_match.group(1).strip() if sol_match is not None else sol.strip()
 
                 # Extract answer from content if it has think/answer tags
-                content_match = re.search(r"<answer>(.*?)</answer>", content)
-                student_answer = content_match.group(1).strip() if content_match else content.strip()
+                content_match = re.search(r"<answer>(.*?)</answer>", content, re.S)
+                student_answer = content_match.group(1).strip() if content_match is not None else content.strip()
 
+                # option_reward = 0.
+                # print("Start-i", content, sol, "End-i")
+                # print("Start", student_answer, ground_truth, "End")
+                # if student_answer == ground_truth:
                 # Compare the extracted answers
+                if student_answer[:1] == ground_truth[:1]:
+                    reward += 0.3
                 if student_answer == ground_truth:
-                    reward = 1.0
+                    reward += 0.7
             except Exception:
                 pass  # Keep reward as 0.0 if both methods fail
 
@@ -48,7 +54,18 @@ def accuracy_reward(completions, assistant, **kwargs):
 
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
-    pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
+    pattern = r"<think>.*?</think>\s*?<answer>.*?</answer>"
+    pattern_1 = r"<think>.*?</think>"
+    pattern_2 = r"<answer>.*?</answer>"
+    print(completions)
     completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, content) for content in completion_contents]
-    return [1.0 if match else 0.0 for match in matches]
+    matches = [re.findall(pattern, content, re.S) for content in completion_contents]
+    
+    matches_1 = [re.findall(pattern_1, content, re.S) for content in completion_contents]
+    matches_2 = [re.findall(pattern_2, content, re.S) for content in completion_contents]
+    
+    score_1 = [1.0 if len(match)>0 else 0.0 for match in matches_1]
+    score_2 = [1.0 if len(match)>0 else 0.0 for match in matches_2]
+    score = [1.0 if len(match)>0 else 0.0 for match in matches]
+    # print([score[i] * 0.5 + score_1[i] * 0.25 + score_2[i] * 0.25 for i in range(len(score))])
+    return [score[i] * 0.5+ score_1[i] * 0.25 + score_2[i] * 0.25 for i in range(len(score))]

@@ -11,8 +11,8 @@
 # You can use 2B instead of 7B
 # MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
 # MODEL_NAME="Qwen/Qwen2-VL-2B-Instruct"
-# MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
+# MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 
 export PYTHONPATH=src:$PYTHONPATH
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -33,14 +33,14 @@ n_norm=32 # 24
 n_flow=32 # 8
 multilevel_qformer=True
 image_resolution=224
-out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_7b_freeze_merge
+out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_3b_pretrain
 # output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_10/checkpoint-2000
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
 
-deepspeed --master_port 29499 src/train/train_sft.py \
+deepspeed --master_port 29500 src/train/train_sft.py \
     --use_liger True \
-    --lora_enable True \
+    --lora_enable False \
     --vision_lora False \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
@@ -48,9 +48,9 @@ deepspeed --master_port 29499 src/train/train_sft.py \
     --lora_alpha 64 \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
-    --deepspeed scripts/zero3.json \
+    --deepspeed scripts/zero2.json \
     --model_id $MODEL_NAME \
-    --data_path local_labels/train_filtered.json \
+    --data_path local_labels/grpo_training.json \
     --image_folder . \
     --remove_unused_columns False \
     --freeze_vision_tower True \
@@ -59,8 +59,8 @@ deepspeed --master_port 29499 src/train/train_sft.py \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
-    --output_dir output/$out_dir \
-    --num_train_epochs 2 \
+    --output_dir output_local/$out_dir \
+    --num_train_epochs 1 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
     --image_min_pixels $((256 * 28 * 28)) \
@@ -87,18 +87,18 @@ deepspeed --master_port 29499 src/train/train_sft.py \
     --n_flow $n_flow \
     --multilevel_qformer $multilevel_qformer \
 
-cd output/$out_dir
-highest_checkpoint=$(ls | grep '^checkpoint-' | sed 's/^checkpoint-//' | sort -nr | head -1)
-echo "Highest checkpoint: $highest_checkpoint"
-rm non_lora_state_dict.bin
-ln -s $PROJ_ROOT/output/$out_dir/checkpoint-$highest_checkpoint/non_lora_state_dict.bin non_lora_state_dict.bin
-cd -
+# cd output_local/$out_dir
+# highest_checkpoint=$(ls | grep '^checkpoint-' | sed 's/^checkpoint-//' | sort -nr | head -1)
+# echo "Highest checkpoint: $highest_checkpoint"
+# rm non_lora_state_dict.bin
+# ln -s $PROJ_ROOT/output_local/$out_dir/checkpoint-$highest_checkpoint/non_lora_state_dict.bin non_lora_state_dict.bin
+# cd -
 
 python src/train/eval_sft.py \
     --use_liger True \
-    --lora_enable True \
+    --lora_enable False \
     --vision_lora False \
-    --use_dora True \
+    --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
     --lora_rank 64 \
     --lora_alpha 64 \

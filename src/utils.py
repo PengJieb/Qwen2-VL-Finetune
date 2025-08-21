@@ -19,7 +19,7 @@ def disable_torch_init():
 
 # This code is borrowed from LLaVA
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, 
-                          device_map="auto", device="cuda", use_flash_attn=False, **gkwargs):
+                          device_map="auto", device="cuda", use_flash_attn=False, grpo_pretrain = None, **gkwargs):
     kwargs = {"device_map": device_map}
     
     if device != "cuda":
@@ -37,12 +37,15 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     else:
         kwargs['torch_dtype'] = torch.float16
 
+    
+    lora_enable = gkwargs.get('lora_enable', False)
+    
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
 
-    if 'lora' in model_name.lower() and model_base is None:
+    if lora_enable and model_base is None:
         warnings.warn('There is `lora` in model name but no `model_base` is provided. If you are loading a LoRA model, please provide the `model_base` argument.')
-    if 'lora' in model_name.lower() and model_base is not None:
+    if lora_enable and model_base is not None and grpo_pretrain is None:
         lora_cfg_pretrained = AutoConfig.from_pretrained(model_path)
         if hasattr(lora_cfg_pretrained, 'quantization_config'):
             del lora_cfg_pretrained.quantization_config
@@ -50,6 +53,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_base, n_frames = gkwargs['n_image']+gkwargs['n_depth']+gkwargs['n_norm']+gkwargs['n_flow'])
         print('Loading Qwen2-VL from base model...')
         if "Qwen2.5" in model_base:
+            print(model_base)
             model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
             assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
                            multilevel_qformer=gkwargs['multilevel_qformer'])
@@ -77,16 +81,57 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         model = model.merge_and_unload()
 
         print('Model Loaded!!!')
+    elif grpo_pretrain is not None:
+        
+        lora_cfg_pretrained = AutoConfig.from_pretrained(model_path)
+        if hasattr(lora_cfg_pretrained, 'quantization_config'):
+            del lora_cfg_pretrained.quantization_config
+        # processor = AutoProcessor.from_pretrained(model_base)
+        processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_base, n_frames = gkwargs['n_image']+gkwargs['n_depth']+gkwargs['n_norm']+gkwargs['n_flow'])
+        print('Loading Qwen2-VL from base model...')
+        if "Qwen2.5" in model_base:
+            print(model_base)
+            model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+            assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
+                           multilevel_qformer=gkwargs['multilevel_qformer'])
+            assign_prefusion(model, gkwargs['n_prefusion_layers'])
+            model.from_pretrained(grpo_pretrain)
+        else:
+            model = Qwen2VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+        token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
+        if model.lm_head.weight.shape[0] != token_num:
+            model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+            model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+        if lora_enable:
+            print('Loading LoRA weights...')
+            model = PeftModel.from_pretrained(model, model_path)
 
+            print('Merging LoRA weights...')
+            model = model.merge_and_unload()
+
+        print('Model Loaded!!!')
     else:
         with open(os.path.join(model_path, 'config.json'), 'r') as f:
             config = json.load(f)
 
         if "Qwen2_5" in config["architectures"][0]:
             # processor = AutoProcessor.from_pretrained(model_path)
-            processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_args.model_id, n_frames = gkwargs['n_image']+gkwargs['n_depth']+gkwargs['n_norm']+gkwargs['n_flow'])
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
-
+            processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_base, n_frames = gkwargs['n_image']+gkwargs['n_depth']+gkwargs['n_norm']+gkwargs['n_flow'])
+            # print(model_base)
+            model_ref = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, **kwargs)
+            kwargs['n_image'] = gkwargs['n_image']
+            kwargs['n_depth'] = gkwargs['n_depth']
+            kwargs['n_norm'] = gkwargs['n_norm']
+            kwargs['n_flow'] = gkwargs['n_flow']
+            kwargs['multilevel_qformer'] = gkwargs['multilevel_qformer']
+            kwargs['n_prefusion_layers'] = gkwargs['n_prefusion_layers']
+            model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_path, low_cpu_mem_usage=True, eval_model = True,
+                                                                           **kwargs)
+            model_dict = {pn:p for pn, p in model.named_parameters()}
+            with torch.no_grad():
+                for pn, p in model_ref.named_parameters():
+                    model_dict[pn].copy_(model_dict[pn])
+            del(model_ref)
         else:
             processor = AutoProcessor.from_pretrained(model_path)
             model = Qwen2VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)

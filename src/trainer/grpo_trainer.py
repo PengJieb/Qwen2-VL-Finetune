@@ -12,9 +12,17 @@ from datasets import Dataset, IterableDataset
 from packaging import version
 import transformers
 import textwrap
-
+import copy
 from torch.utils.data import DataLoader, Sampler
-
+from src.constants import (
+    IGNORE_INDEX,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IMAGE_TOKEN,
+    DEFAULT_VIDEO_TOKEN,
+    SYSTEM_MESSAGE,
+    GRPO_MESSAGE
+)
 from accelerate.utils import is_peft_model, set_seed, broadcast_object_list, gather, gather_object
 from transformers.utils import is_peft_available, is_datasets_available
 
@@ -58,8 +66,10 @@ from trl.trainer.utils import (
 
 from src.train.train_utils import get_peft_state_non_lora_maybe_zero_3
 from src.constants import MULTIMODAL_KEYWORDS
+from src.dataset.data_utils import replace_image_tokens
 
-from qwen_vl_utils import process_vision_info
+from qwen_vl_utils import process_vision_info, fetch_image, fetch_video
+from PIL import Image
 
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
@@ -261,6 +271,83 @@ def nanmax(tensor: torch.Tensor) -> torch.Tensor:
         return torch.tensor(float("nan"), dtype=tensor.dtype, device=tensor.device)
     return torch.max(tensor[~torch.isnan(tensor)])
 
+def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
+    vision_infos = []
+    if isinstance(conversations[0], dict):
+        conversations = [conversations]
+    for conversation in conversations:
+        for message in conversation:
+            if isinstance(message["content"], list):
+                for ele in message["content"]:
+                    if (
+                        "image" in ele
+                        or "image_url" in ele
+                        or "video" in ele
+                        or ele.get("type","") in ("image", "image_url", "video")
+                        or 'depth' in ele
+                        or 'norm' in ele
+                        or 'flow' in ele
+                        or 'text' in ele
+                    ):
+                        vision_infos.append(ele)
+    return vision_infos
+
+def process_vision_info_more(
+    conversations: list[dict] | list[list[dict]],
+    return_video_kwargs: bool = False,
+):
+
+    vision_infos = extract_vision_info(conversations)
+    # print(vision_infos)
+    ## Read images or videos
+    image_inputs = []
+    depth_inputs = []
+    norm_inputs = []
+    flow_inputs = []
+    video_inputs = []
+    text_inputs = []
+    video_sample_fps_list = []
+    for vision_info in vision_infos:
+        if 'type' in vision_info:
+            if 'image' == vision_info['type']:
+                image_inputs.append(fetch_image(vision_info))
+            elif 'video' == vision_info['type']:
+                video_input, video_sample_fps = fetch_video(vision_info, return_video_sample_fps=True)
+                video_sample_fps_list.append(video_sample_fps)
+                video_inputs.append(video_input)
+            elif 'depth' == vision_info['type']:
+                depth_inputs.append(fetch_image(vision_info))
+            elif 'norm' == vision_info['type']:
+                norm_inputs.append(fetch_image(vision_info))
+            elif 'flow' == vision_info['type']:
+                flow_inputs.append(fetch_image(vision_info))
+            elif 'text' == vision_info['type']:
+                text_inputs.append(vision_info['text'])
+            else:
+                raise ValueError("image, image_url or video should in content.")
+        # if 'image'
+        # if "image" in vision_info or "image_url" in vision_info:
+        #     image_inputs.append(fetch_image(vision_info))
+        # elif "video" in vision_info:
+        #     video_input, video_sample_fps = fetch_video(vision_info, return_video_sample_fps=True)
+        #     video_sample_fps_list.append(video_sample_fps)
+        #     video_inputs.append(video_input)
+        # elif 'depth' in vision_info:
+        #     depth_inputs.append(fetch_image(vision_info))
+        # elif 'flow' in vision_info:
+        #     flow_inputs.append(fetch_image(vision_info))
+        # elif 'norm' in vision_info:
+        #     norm_inputs.append(fetch_image(vision_info))
+        # else:
+        #     raise ValueError("image, image_url or video should in content.")
+    if len(image_inputs) == 0:
+        image_inputs = None
+    if len(video_inputs) == 0:
+        video_inputs = None
+    if return_video_kwargs:
+        return image_inputs, video_inputs, {'fps': video_sample_fps_list}, None, None, None
+    # print(len(image_inputs), len(depth_inputs), len(norm_inputs), len(flow_inputs))
+    return image_inputs, depth_inputs, norm_inputs, flow_inputs, video_inputs, text_inputs
 
 class QwenGRPOTrainer(Trainer):
     def __init__(
@@ -276,14 +363,13 @@ class QwenGRPOTrainer(Trainer):
         optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
         peft_config: Optional["PeftConfig"] = None
     ):
-        
         if args is None:
             model_name = model if isinstance(model, str) else model.config._name_or_path
             model_name = model_name.split("/")[-1]
             args = GRPOConfig(f"{model_name}-GRPO")
 
         model_init_kwargs = args.model_init_kwargs or {}
-
+        # print(is_peft_model(model), "#" * 30)
         if isinstance(model, str):
             model_id = model
             torch_dtype = model_init_kwargs.get("torch_dtype")
@@ -348,7 +434,7 @@ class QwenGRPOTrainer(Trainer):
         # Enable gradient checkpointing if requested
         if args.gradient_checkpointing:
             model = self._enable_gradient_checkpointing(model, args)
-
+        # print("Loading Reference Model:", type(model_id), type(model))
         # Reference model
         self.beta = args.beta
         if self.beta == 0.0:
@@ -356,10 +442,12 @@ class QwenGRPOTrainer(Trainer):
             self.ref_model = None
         elif is_deepspeed_zero3_enabled():
             if "Qwen2.5" in model_id:
+                print("Loading Reference Model:", model_id)
                 self.ref_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                     model_id,
                     **model_init_kwargs,
                 )
+                
             else:
                 self.ref_model = Qwen2VLForConditionalGeneration.from_pretrained(
                     model_id,
@@ -370,9 +458,11 @@ class QwenGRPOTrainer(Trainer):
             # to revert to the initial model.
             self.ref_model = None
         else:
+            
             # If PEFT configuration is not provided, create a reference model based on the initial model.
             self.ref_model = create_reference_model(model)
-
+            
+        # print(type(model), model)
         # Processing class
         if processing_class is None:
             processing_class = AutoProcessor.from_pretrained(model_id)
@@ -603,7 +693,7 @@ class QwenGRPOTrainer(Trainer):
         # model accepts loss-related kwargs. Since we compute our own loss, this check is irrelevant. We set
         # self.model_accepts_loss_kwargs to False to enable scaling.
         self.model_accepts_loss_kwargs = False
-
+        # print(type(self.ref_model))
         if self.ref_model is not None:
             if self.is_deepspeed_enabled:
                 self.ref_model = prepare_deepspeed(self.ref_model, self.accelerator)
@@ -619,6 +709,11 @@ class QwenGRPOTrainer(Trainer):
                     self.reward_funcs[i] = prepare_deepspeed(reward_func, self.accelerator)
                 else:
                     self.reward_funcs[i] = self.accelerator.prepare_model(reward_func, evaluation_mode=True)
+
+        # print(self.ref_model)
+        # for pn, p in self.model.named_parameters():
+        #     # if p.requires_grad:
+        #     print(pn, p.requires_grad)
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
@@ -816,26 +911,71 @@ class QwenGRPOTrainer(Trainer):
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         mode = "eval" if self.control.should_evaluate else "train"
-
+        # print(inputs)
         prompts = [x["prompt"] for x in inputs]
+        # tt_prompts = []
+        system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
+
+        # print(prompts)
+        image_inputs, depth_inputs, norm_inputs, flow_inputs, video_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False)
+        # print(len(image_inputs), len(depth_inputs), len(norm_inputs), len(flow_inputs), len(text_inputs))
+
+        prompts_text = [
+            system_message + f"{DEFAULT_IM_START_TOKEN}{'user'}\n{replace_image_tokens(item)}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}assistant\n"
+            for item in text_inputs
+        ]
+        # print("\nPrompt Text\n")
+        # for item in prompts_text:
+        #     print(item)
+        tmp_prompt_text = copy.deepcopy(prompts_text)
         
-        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
-
-        image_inputs, video_inputs, video_kwargs = process_vision_info(prompts, return_video_kwargs=True)
-
+        # exit()
+        
         prompt_inputs = self.processing_class(
             text = prompts_text,
             images=image_inputs,
             videos=video_inputs,
-            padding=True,
-            padding_side="left",
-            return_tensors="pt",
-            **video_kwargs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
         )
-
+        
+        tmp_prompt_inputs = self.processing_class(
+            text = copy.deepcopy(tmp_prompt_text),
+            images=depth_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        prompt_inputs['depth_values'] = tmp_prompt_inputs['pixel_values']
+        
+        tmp_prompt_inputs = self.processing_class(
+            text = copy.deepcopy(tmp_prompt_text),
+            images=flow_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        prompt_inputs['flow_values'] = tmp_prompt_inputs['pixel_values']
+        
+        tmp_prompt_inputs = self.processing_class(
+            text = copy.deepcopy(tmp_prompt_text),
+            images=norm_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        prompt_inputs['norm_values'] = tmp_prompt_inputs['pixel_values']
+        prompt_inputs['norm_value_grid'] = tmp_prompt_inputs['image_grid_thw']
+        # print(prompt_inputs.keys())
+        # print(prompt_inputs["input_ids"].shape, prompt_inputs["attention_mask"].shape)
+        # print(self.processing_class.tokenizer.decode(prompt_inputs["input_ids"][0], skip_special_tokens=False))
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-
+        # print(prompt_ids.shape)
         if self.max_prompt_length is not None:
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
@@ -960,6 +1100,8 @@ class QwenGRPOTrainer(Trainer):
                         texts = [apply_chat_template(x, reward_processing_class)["text"] for x in messages]
                     else:
                         texts = [p + c for p, c in zip(prompts, completions)]
+                    # print(completions)
+                    # print(texts)
                     reward_inputs = reward_processing_class(
                         text=texts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
                     )

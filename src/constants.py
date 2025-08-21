@@ -11,4 +11,14 @@ VISION_END_TOKEN = "<|vision_end|>"
 
 SYSTEM_MESSAGE = "You are a helpful assistant."
 
-MULTIMODAL_KEYWORDS = ["pixel_values", "image_grid_thw", "video_grid_thw", "pixel_values_videos", "second_per_grid_ts"]
+GRPO_MESSAGE = "First output the thinking process in <think> </think> tags and then output the final answer in <answer> </answer> tags."
+
+MULTIMODAL_KEYWORDS = ["pixel_values", 
+                       "image_grid_thw", 
+                       "video_grid_thw", 
+                       "pixel_values_videos", 
+                       "second_per_grid_ts", 
+                       "depth_values",
+                       "norm_values",
+                       "flow_values",
+                       "norm_value_grid"]

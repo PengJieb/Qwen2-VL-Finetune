@@ -14,8 +14,9 @@ import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
 from transformers import AutoTokenizer
 from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMore, assign_qformer
-from src.trainer import QwenSFTTrainer
-from src.dataset import make_supervised_data_module, make_supervised_eval_data_module
+from src.trainer.grpo_trainer import process_vision_info_more
+from src.dataset import make_supervised_data_module, make_supervised_eval_data_module, make_grpo_nextqa_data_module
+from src.dataset.data_utils import replace_image_tokens
 from src.params import DataArguments, ModelArguments, TrainingArguments
 from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
@@ -26,6 +27,17 @@ import argparse
 local_rank = None
 import json
 from tqdm import tqdm
+import re
+from src.constants import (
+    IGNORE_INDEX,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IMAGE_TOKEN,
+    DEFAULT_VIDEO_TOKEN,
+    SYSTEM_MESSAGE,
+    GRPO_MESSAGE
+)
+import copy
 
 def rank0_print(*args):
     if local_rank == 0 or local_rank == '0' or local_rank is None:
@@ -71,7 +83,7 @@ def configure_llm(model, training_args):
     set_requires_grad(llm_params, not training_args.freeze_llm)
 
 
-def eva():
+def eval():
     parser = HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     
@@ -86,10 +98,10 @@ def eva():
                                                 n_image=model_args.n_image, n_depth=model_args.n_depth,
                                                 n_norm=model_args.n_norm, n_flow=model_args.n_flow, n_prefusion_layers=model_args.n_prefusion_layers,
                                                 multilevel_qformer=model_args.multilevel_qformer,
-                                                lora_enable = lora_enable
+                                                lora_enable = lora_enable, grpo_pretrain = model_args.sft_model_path
                         )
 
-    data_module = make_supervised_eval_data_module(model_id=model_args.model_id,
+    data_module = make_grpo_nextqa_data_module(model_id=model_args.model_id,
                                               processor=processor,
                                               data_args=data_args)
 
@@ -100,14 +112,14 @@ def eva():
     #     non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
     # model.load_state_dict(non_lora_trainables, strict=False)
 
-    dataloader = DataLoader(data_module['train_dataset'], batch_size=1, collate_fn=data_module['data_collator'], shuffle=False)
+    dataloader = DataLoader(data_module['train_dataset'], batch_size=1, collate_fn=data_module['data_fn'], shuffle=False)
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_id, trust_remote_code=True)
     generation_args = {
-        "max_new_tokens": 30,
+        "max_new_tokens": 256,
         "temperature": 0.95,
         "do_sample": True,
-        "repetition_penalty": 0.5,
-        
+        "repetition_penalty": 1.0,
+        "top_p": 0.95
     }
     device = training_args.device
     model = model.to(device, dtype=torch.bfloat16)
@@ -120,31 +132,109 @@ def eva():
     all_cnt = 0
     for batch in tqdm(dataloader):
         all_cnt += 1
-        batch = {k: v.to(device) if hasattr(v, 'to') else v for k, v in batch.items()}
-        qid = batch.pop('qid')[0]
+        # batch = {k: v.to(device) if hasattr(v, 'to') else v for k, v in batch.items()}
+        qid = batch[0].pop('qid')
         # print(batch)
+        prompts = [x["prompt"] for x in batch]
+        labels=batch[0]['assistant']['content']
+        system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
+        image_inputs, depth_inputs, norm_inputs, flow_inputs, video_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False)
+        
+        prompts_text = [
+            system_message + f"{DEFAULT_IM_START_TOKEN}{'user'}\n{replace_image_tokens(item)}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}assistant\n"
+            for item in text_inputs
+        ]
+        # print(prompts_text)
+        
+        tmp_prompt_text = copy.deepcopy(prompts_text)
+        prompt_inputs = processor(
+            text = prompts_text,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        tmp_prompt_inputs = processor(
+            text = copy.deepcopy(tmp_prompt_text),
+            images=depth_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        prompt_inputs['depth_values'] = tmp_prompt_inputs['pixel_values']
+        
+        tmp_prompt_inputs = processor(
+            text = copy.deepcopy(tmp_prompt_text),
+            images=flow_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        prompt_inputs['flow_values'] = tmp_prompt_inputs['pixel_values']
+        
+        tmp_prompt_inputs = processor(
+            text = copy.deepcopy(tmp_prompt_text),
+            images=norm_inputs,
+            videos=video_inputs,
+            padding=False,
+            do_resize=False,
+            return_tensors="pt"
+        )
+        prompt_inputs['norm_values'] = tmp_prompt_inputs['pixel_values']
+        prompt_inputs['norm_value_grid'] = tmp_prompt_inputs['image_grid_thw']
+        
+        prompt_inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in prompt_inputs.items()}
         # print(tokenizer.decode(batch['input_ids'][0], skip_special_tokens=False))
-        out = model.generate(eos_token_id=processor.tokenizer.eos_token_id, **batch, **generation_args)
+        out = model.generate(eos_token_id=processor.tokenizer.eos_token_id, **prompt_inputs, **generation_args)
         pred = tokenizer.decode(out[0], skip_special_tokens=False)
-        print(pred)
+        # print(pred)
         pred = pred.split('assistant')[-1][1:]
-        label_index = batch['labels'][0]
-        label_index = label_index[label_index!= -100]
-        label = tokenizer.decode(label_index, skip_special_tokens=True)
+        # label_index = batch['labels'][0]
+        # label_index = label_index[label_index!= -100]
+        # label = tokenizer.decode(label_index, skip_special_tokens=True)
         
         qtype = qid.split('_')[0]
-        
-        a_label = label[0]
-        a_pred = pred[0]
-        # print(a_label, a_pred)
-        # if all_acc
-        if a_label == a_pred:
+        # print(labels)
+        print(pred)
+        print(labels)
+        # a_label = label[0]
+        label_match = re.search(r"<answer>(.*?)</answer>", labels, re.S)
+        ground_truth = label_match.group(1).strip() if label_match is not None else labels.strip()
+        if "</think>" in pred:
+            pred = pred.split('</think>')[1]
+        pred_match = re.search(r"<answer>(.*?)</answer>", pred, re.S)
+        if pred_match is None:
             group_acc[qtype] += 1
             overall_acc[qtype[0]] += 1
             all_acc += 1
+            continue
+        student_answer = pred_match.group(1).strip() if pred_match is not None else pred_match.strip()
+        print(ground_truth)
+        print(student_answer)
+        if len(student_answer) == 0:
+            group_acc[qtype] += 1
+            overall_acc[qtype[0]] += 1
+            all_acc += 1
+            continue
+        # a_pred = pred[0]
+        # print(a_label, a_pred)
+        # if all_acc
+        if student_answer[0] == ground_truth[0]:
+            group_acc[qtype] += 1
+            overall_acc[qtype[0]] += 1
+            all_acc += 1
+        else:
+            if ':' in student_answer and ':' in ground_truth:
+                if student_answer.split(':')[0][-2:]==ground_truth.split(':')[0][-2:]:
+                    group_acc[qtype] += 1
+                    overall_acc[qtype[0]] += 1
+                    all_acc += 1
         group_cnt[qtype] += 1
         overall_cnt[qtype[0]] += 1
-
+        print('Acc: {:.2f}'.format(all_acc*100.0/(all_cnt+0.00001)))
         # print(label, pred)
         # print(a_label, a_pred)
         # print(len(a_label), len(a_pred))
@@ -194,4 +284,4 @@ def eva():
 
 
 if __name__ == "__main__":
-    eva()
+    eval()

@@ -20,7 +20,8 @@ from src.constants import (
 from tqdm import tqdm
 from src.dataset.data_utils import get_image_info, get_video_info, llava_to_openai, pad_sequence
 
-
+import pathlib
+from PIL import Image
 
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -130,7 +131,7 @@ class SupervisedDataset(Dataset):
 
             user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
             gpt_response = f"{gpt_response['content']}{DEFAULT_IM_END_TOKEN}\n"
-            
+            print(user_input)
             if DEFAULT_IMAGE_TOKEN in user_input:
                 inputs = processor(text=[user_input], images=images, videos=videos, padding=False, do_resize=False, return_tensors='pt')
                 prompt_input_ids = inputs['input_ids']
@@ -223,8 +224,112 @@ class SupervisedDatasetNextQA(Dataset):
         self.video_resized_w = data_args.video_resized_width
         self.video_resized_h = data_args.video_resized_height
         self.fps = data_args.fps
+        self.image_folder = self.data_args.image_folder
+        # self.irregular_dir = pathlib.Path(self.image_folder).joinpath("irregular")
+        # self.irregular_dir.mkdir(parents=True, exist_ok=True)
+        # self.irregular_log = {}
+        # for irregular_file in self.irregular_dir.iterdir():
+        #     with open(irregular_file, "r") as f:
+        #         self.irregular_log[irregular_file.stem] = json.load(f)
+
+            
         # print("#"*40, type(self.processor))
 
+    def check_and_sample(self, i):
+        
+        image_folder = pathlib.Path(self.data_args.image_folder)
+        sources = self.list_data_dict[i]
+        source_id = sources['id']
+        image = sources['image']
+        image_ids  = []
+        for img in image:
+            image_id = pathlib.Path(img).stem
+            image_ids.append(image_id)
+        
+        image_root = pathlib.Path(sources['image'][0]).parent
+        depth_root = pathlib.Path(sources['depth'][0]).parent
+        flow_root = pathlib.Path(sources['flow'][0]).parent
+        norm_root = pathlib.Path(sources['norm'][0]).parent
+        
+        selected_img_ids = random.sample(image_ids, 10)
+        selected_image = [str(image_root.joinpath(f"{iid}.jpg")) for iid in selected_img_ids]
+        selected_depth = [str(depth_root.joinpath(f"{iid}_colored.png")) for iid in selected_img_ids]
+        selected_flow = [str(flow_root.joinpath(f"{iid}_pred_colored.png")) for iid in selected_img_ids]
+        selected_norm = [str(norm_root.joinpath(f"{iid}_pred_norm.png")) for iid in selected_img_ids]
+        return selected_image, selected_depth, selected_flow, selected_norm
+        
+        image.sort()
+        
+        image_root = pathlib.Path(sources['image'][0]).parent
+        depth_root = pathlib.Path(sources['depth'][0]).parent
+        flow_root = pathlib.Path(sources['flow'][0]).parent
+        norm_root = pathlib.Path(sources['norm'][0]).parent
+        
+        if source_id in self.irregular_log:
+            selected_img_ids = random.sample(image_ids, 4)
+            selected_image = [str(image_root.joinpath(f"{iid}.jpg")) for iid in selected_img_ids]
+            selected_depth = [str(depth_root.joinpath(f"{iid}_colored.png")) for iid in selected_img_ids]
+            selected_flow = [str(flow_root.joinpath(f"{iid}_pred_colored.png")) for iid in selected_img_ids]
+            selected_norm = [str(norm_root.joinpath(f"{iid}_pred_norm.png")) for iid in selected_img_ids]
+            return selected_image, selected_depth, selected_flow, selected_norm
+        irregular_log = {
+            "image": [],
+            "depth": [],
+            "flow": [],
+            "norm": []
+        }
+        irregular_id = []
+        regular_id = []
+        for img_id in image_ids:
+            image_img = image_folder.joinpath(image_root.joinpath(f"{img_id}.jpg"))
+            depth_img = image_folder.joinpath(depth_root.joinpath(f"{img_id}_colored.png"))
+            flow_img = image_folder.joinpath(flow_root.joinpath(f"{img_id}_pred_colored.png"))
+            norm_img = image_folder.joinpath(norm_root.joinpath(f"{img_id}_pred_norm.png"))
+            # print(flow_img)
+            if not image_img.exists() or not depth_img.exists() or not flow_img.exists() or not norm_img.exists():
+                print(f"Find Error Image with id: {img_id}, {image_img.exists()}, {depth_img.exists()}, {flow_img.exists()}, {norm_img.exists()}")
+                irregular_id.append(img_id)
+                continue
+            
+            try:
+                Image.open(image_img)
+                Image.open(depth_img)
+                Image.open(flow_img)
+                Image.open(norm_img)
+            except Exception as e:
+                irregular_id.append(img_id)
+                print(f"Find Error Image with id: {img_id}, {e}")
+                continue
+            regular_id.append(img_id)
+            
+        selected_img_ids = random.sample(regular_id, 4)
+        selected_image = [str(image_root.joinpath(f"{iid}.jpg")) for iid in selected_img_ids]
+        selected_depth = [str(depth_root.joinpath(f"{iid}_colored.png")) for iid in selected_img_ids]
+        selected_flow = [str(flow_root.joinpath(f"{iid}_pred_colored.png")) for iid in selected_img_ids]
+        selected_norm = [str(norm_root.joinpath(f"{iid}_pred_norm.png")) for iid in selected_img_ids]
+        
+            
+        for iid in irregular_id:
+            image_img = image_root.joinpath(f"{iid}.jpg")
+            depth_img = depth_root.joinpath(f"{iid}_colored.png")
+            float_img = flow_root.joinpath(f"{iid}_pred_colored.png")
+            norm_img = norm_root.joinpath(f"{iid}_pred_norm.png")
+            if image_img in self.list_data_dict[i]['image']:
+                self.list_data_dict[i]['image'].remove(image_img)
+            if depth_img in self.list_data_dict[i]['depth']:
+                self.list_data_dict[i]['depth'].remove(depth_img)
+            if float_img in self.list_data_dict[i]['flow']:
+                self.list_data_dict[i]['flow'].remove(float_img)
+            if norm_img in self.list_data_dict[i]['norm']:
+                self.list_data_dict[i]['norm'].remove(norm_img)
+            irregular_log["image"].append(str(image_img))
+            irregular_log["depth"].append(str(depth_img))
+            irregular_log["flow"].append(str(float_img))
+            irregular_log["norm"].append(str(norm_img))
+        with open(self.irregular_dir.joinpath(f"{source_id}.json"), "w") as f:
+            json.dump(irregular_log, f, indent=4)
+            
+        return selected_image, selected_depth, selected_flow, selected_norm
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -235,6 +340,7 @@ class SupervisedDatasetNextQA(Dataset):
         is_video = False
         n_image = 0
         processor = self.processor
+        selected_image, selected_depth, selected_flow, selected_norm = self.check_and_sample(i)
         # print(sources['norm'][0])
         if "image" in sources:
             videos = None
@@ -249,7 +355,7 @@ class SupervisedDatasetNextQA(Dataset):
             images = []
             
             
-            image_files = random.sample(image_files, 4)
+            image_files = selected_image
             image_files.sort()
             
             for image_file in image_files:
@@ -289,7 +395,7 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             depth = []
-            image_files = random.sample(image_files, 4)
+            image_files = selected_depth
             image_files.sort()
             for image_file in image_files:
                 if not os.path.exists(image_file):
@@ -304,7 +410,7 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             flow = []
-            image_files = random.sample(image_files, 4)
+            image_files = selected_flow
             image_files.sort()
             for image_file in image_files:
                 if not os.path.exists(image_file):
@@ -319,7 +425,7 @@ class SupervisedDatasetNextQA(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             norm = []
-            image_files = random.sample(image_files, 4)
+            image_files = selected_norm
             image_files.sort()
             for image_file in image_files:
                 if not os.path.exists(image_file):
@@ -330,10 +436,8 @@ class SupervisedDatasetNextQA(Dataset):
                 except:
                     print(image_file, "XXXXXX")
                     continue
-
-            
         
-
+        
         sources = copy.deepcopy(llava_to_openai(sources['conversations'], is_video=is_video))
 
         all_input_ids = [] 
@@ -362,7 +466,7 @@ class SupervisedDatasetNextQA(Dataset):
 
             user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
             gpt_response = f"{gpt_response['content']}{DEFAULT_IM_END_TOKEN}\n"
-            
+            # print(gpt_response)
             if DEFAULT_IMAGE_TOKEN in user_input:
                 inputs = processor(text=[user_input], images=images, videos=videos, padding=False, do_resize=False, return_tensors='pt')
                 prompt_input_ids = inputs['input_ids']
@@ -499,7 +603,7 @@ class SupervisedDatasetNextQAEval(Dataset):
             images = []
             
             total_count = len(image_files)
-            sample_count = 4
+            sample_count = 10
             indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
             indices = sorted(list(set(indices)))
             saved_files = []
@@ -547,7 +651,7 @@ class SupervisedDatasetNextQAEval(Dataset):
             depth = []
             
             total_count = len(image_files)
-            sample_count = 4
+            sample_count = 10
             indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
             indices = sorted(list(set(indices)))
             saved_files = []
@@ -571,7 +675,7 @@ class SupervisedDatasetNextQAEval(Dataset):
             flow = []
             
             total_count = len(image_files)
-            sample_count = 4
+            sample_count = 10
             indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
             indices = sorted(list(set(indices)))
             saved_files = []
@@ -595,7 +699,7 @@ class SupervisedDatasetNextQAEval(Dataset):
             norm = []
             
             total_count = len(image_files)
-            sample_count = 4
+            sample_count = 10
             indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
             indices = sorted(list(set(indices)))
             saved_files = []
@@ -612,9 +716,9 @@ class SupervisedDatasetNextQAEval(Dataset):
 
             
         
-
+        # print(sources['conversations'])
         sources = copy.deepcopy(llava_to_openai(sources['conversations'], is_video=is_video))
-
+        # print(sources)
         all_input_ids = [] 
         all_labels = []
         all_pixel_values = []
@@ -639,7 +743,7 @@ class SupervisedDatasetNextQAEval(Dataset):
             user_input = sources[j]
             gpt_response = sources[j + 1]
 
-            user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
+            user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\nAlway output <think></think> after the assistant first.\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
             gpt_response = f"{gpt_response['content']}{DEFAULT_IM_END_TOKEN}\n"
             
             if DEFAULT_IMAGE_TOKEN in user_input:
@@ -832,7 +936,7 @@ def make_supervised_eval_data_module(model_id, processor, data_args):
 if __name__ == "__main__":
     from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMore, assign_qformer, Qwen2_5_VLProcessorOneToken, assign_prefusion
     data_config = DataArguments(
-        data_path = 'nextqa_subset/train.json',
+        data_path = 'local_labels/train_filtered.json',
         image_folder = '.',
         image_min_pixels = 256*28*28,
         image_max_pixels=256*28*28,
@@ -843,8 +947,15 @@ if __name__ == "__main__":
     processor = Qwen2_5_VLProcessorOneToken.from_pretrained('Qwen/Qwen2.5-VL-3B-Instruct', 
                                                             n_frames = 16*4)
     data_collator = DataCollatorForSupervisedDataset(pad_token_id=processor.tokenizer.pad_token_id)
-    dataset = SupervisedDatasetNextQA(
-        'nextqa_subset/train.json',
+    # dataset = SupervisedDatasetNextQA(
+    #     'local_labels/train_filtered.json',
+    #     processor,
+    #     data_config,
+    #     'Qwen/Qwen2.5-VL-3B-Instruct'
+    # )
+    
+    dataset = SupervisedDatasetNextQAEval(
+        'local_labels/val.json',
         processor,
         data_config,
         'Qwen/Qwen2.5-VL-3B-Instruct'

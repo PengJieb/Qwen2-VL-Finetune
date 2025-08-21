@@ -10,6 +10,7 @@ from trl import GRPOConfig as GRPOConfigTRL
 class ModelArguments:
     model_id: Optional[str] = field(default="Qwen/Qwen2-VL-7B-Instruct")
     model_path: Optional[str] = field(default="output/lora_vision_test")
+    sft_model_path: Optional[str] = field(default=None)
     n_image: int = field(default=64)
     n_depth: int = field(default=64)
     n_norm: int = field(default=64)
@@ -165,8 +166,8 @@ class GRPOArguments(GRPOConfigTRL):
             "training speed, but may be numerically unstable for long training runs."
         },
     )
-    temperature: float = 0.9
-    top_p: float = 1.0
+    temperature: float = 0.95
+    top_p: float = 0.95
     top_k: int = 50
     min_p: Optional[float] = None
     repetition_penalty: float = 1.0
