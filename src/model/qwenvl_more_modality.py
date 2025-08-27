@@ -209,7 +209,7 @@ class Qwen2_5_VLProcessorOneToken(Qwen2_5_VLProcessor):
                     )
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
-
+        # print(len(text))
         text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
 
         return BatchFeature(data={**text_inputs, **image_inputs, **videos_inputs})

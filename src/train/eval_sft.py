@@ -15,9 +15,12 @@ from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditiona
 from transformers import AutoTokenizer
 from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMore, assign_qformer
 from src.trainer import QwenSFTTrainer
-from src.dataset import make_supervised_data_module, make_supervised_eval_data_module
+from src.trainer.grpo_trainer import extract_vision_info
+from qwen_vl_utils import fetch_image
+from src.dataset import make_supervised_data_module, make_supervised_eval_data_module, make_supervised_eval_data_module2
 from src.params import DataArguments, ModelArguments, TrainingArguments
 from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
+from src.dataset.data_utils import replace_image_tokens
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 import pathlib
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2_vl, apply_liger_kernel_to_qwen2_5_vl
@@ -26,6 +29,18 @@ import argparse
 local_rank = None
 import json
 from tqdm import tqdm
+import random
+import copy
+
+from src.constants import (
+    IGNORE_INDEX,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IMAGE_TOKEN,
+    DEFAULT_VIDEO_TOKEN,
+    SYSTEM_MESSAGE,
+    GRPO_MESSAGE
+)
 
 def rank0_print(*args):
     if local_rank == 0 or local_rank == '0' or local_rank is None:
@@ -71,6 +86,63 @@ def configure_llm(model, training_args):
     set_requires_grad(llm_params, not training_args.freeze_llm)
 
 
+def process_vision_info_more(
+    conversations: list[dict] | list[list[dict]],
+    return_video_kwargs: bool = False,
+    n_frame = 4, is_random = True
+):
+
+    vision_infos = extract_vision_info(conversations)
+    # print(vision_infos)
+    ## Read images or videos
+    image_inputs = []
+    depth_inputs = []
+    norm_inputs = []
+    flow_inputs = []
+    text_inputs = []
+    
+    image_info = []
+    depth_info = []
+    norm_info = []
+    flow_info = []
+    
+    for vision_info in vision_infos:
+        if 'type' in vision_info:
+            if 'image' == vision_info['type']:
+                image_info.append(vision_info)
+            elif 'depth' == vision_info['type']:
+                depth_info.append(vision_info)
+            elif 'norm' == vision_info['type']:
+                norm_info.append(vision_info)
+            elif 'flow' == vision_info['type']:
+                flow_info.append(vision_info)
+            elif 'text' == vision_info['type']:
+                text_inputs.append(vision_info['text'])
+            else:
+                raise ValueError("image, image_url or video should in content.")
+    
+    n_frames = min(len(image_info), len(depth_info), len(norm_info), len(flow_info))
+    # print(f"N FRAME: {n_frames}")
+    indices = [i for i in range(n_frames)]
+    if is_random:
+        selected_frame_ids = random.sample(indices, n_frame)
+        selected_frame_ids.sort()
+        
+    else:
+        indices = [int(i * (n_frames - 1) / (n_frame - 1)) for i in range(n_frame)]
+        selected_frame_ids = sorted(list(set(indices)))
+    # print(selected_frame_ids)
+    for sid in selected_frame_ids:
+        image_inputs.append(fetch_image(image_info[sid]))
+        depth_inputs.append(fetch_image(depth_info[sid]))
+        norm_inputs.append(fetch_image(norm_info[sid]))
+        flow_inputs.append(fetch_image(flow_info[sid]))
+    if len(image_inputs) == 0:
+        image_inputs = None
+
+    # print(len(image_inputs), len(depth_inputs), len(norm_inputs), len(flow_inputs))
+    return image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs
+
 def eva():
     parser = HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
@@ -89,7 +161,7 @@ def eva():
                                                 lora_enable = lora_enable
                         )
 
-    data_module = make_supervised_eval_data_module(model_id=model_args.model_id,
+    data_module = make_supervised_eval_data_module2(model_id=model_args.model_id,
                                               processor=processor,
                                               data_args=data_args)
 
@@ -100,14 +172,16 @@ def eva():
     #     non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
     # model.load_state_dict(non_lora_trainables, strict=False)
 
-    dataloader = DataLoader(data_module['train_dataset'], batch_size=1, collate_fn=data_module['data_collator'], shuffle=False)
+    n_times = 1
+    
+    dataloader = DataLoader(data_module['train_dataset'], batch_size=1, collate_fn=data_module['data_collator'], num_workers=8, shuffle=False)
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_id, trust_remote_code=True)
     generation_args = {
-        "max_new_tokens": 30,
+        "max_new_tokens": 4,
         "temperature": 0.95,
         "do_sample": True,
-        "repetition_penalty": 0.5,
-        
+        "repetition_penalty": 1.0,
+        "top_p": 0.95
     }
     device = training_args.device
     model = model.to(device, dtype=torch.bfloat16)
@@ -120,30 +194,93 @@ def eva():
     all_cnt = 0
     for batch in tqdm(dataloader):
         all_cnt += 1
-        batch = {k: v.to(device) if hasattr(v, 'to') else v for k, v in batch.items()}
-        qid = batch.pop('qid')[0]
-        # print(batch)
-        # print(tokenizer.decode(batch['input_ids'][0], skip_special_tokens=False))
-        out = model.generate(eos_token_id=processor.tokenizer.eos_token_id, **batch, **generation_args)
-        pred = tokenizer.decode(out[0], skip_special_tokens=False)
-        print(pred)
-        pred = pred.split('assistant')[-1][1:]
-        label_index = batch['labels'][0]
-        label_index = label_index[label_index!= -100]
-        label = tokenizer.decode(label_index, skip_special_tokens=True)
+        # batch = {k: v.to(device) if hasattr(v, 'to') else v for k, v in batch.items()}
+        qid = batch[0].pop('qid')
         
-        qtype = qid.split('_')[0]
+        prompts = [x["prompt"] for x in batch]
+        labels=batch[0]['assistant']['content']
+        # print(labels)
+        system_message=f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE} always describe image first“ + ”{DEFAULT_IM_END_TOKEN}\n"
         
-        a_label = label[0]
-        a_pred = pred[0]
-        # print(a_label, a_pred)
+        inner_pred = []
+        for j in range(n_times):
+        
+            image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False)
+            video_inputs = None
+            prompts_text = [
+                system_message + f"{DEFAULT_IM_START_TOKEN}{'user'}\n{replace_image_tokens(item)}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}assistant\n"
+                for item in text_inputs
+            ]
+
+            tmp_prompt_text = copy.deepcopy(prompts_text)
+            prompt_inputs = processor(
+                text = prompts_text,
+                images=image_inputs,
+                videos=video_inputs,
+                padding=False,
+                do_resize=False,
+                return_tensors="pt"
+            )
+            tmp_prompt_inputs = processor(
+                text = copy.deepcopy(tmp_prompt_text),
+                images=depth_inputs,
+                videos=video_inputs,
+                padding=False,
+                do_resize=False,
+                return_tensors="pt"
+            )
+            prompt_inputs['depth_values'] = tmp_prompt_inputs['pixel_values']
+            
+            tmp_prompt_inputs = processor(
+                text = copy.deepcopy(tmp_prompt_text),
+                images=flow_inputs,
+                videos=video_inputs,
+                padding=False,
+                do_resize=False,
+                return_tensors="pt"
+            )
+            prompt_inputs['flow_values'] = tmp_prompt_inputs['pixel_values']
+            
+            tmp_prompt_inputs = processor(
+                text = copy.deepcopy(tmp_prompt_text),
+                images=norm_inputs,
+                videos=video_inputs,
+                padding=False,
+                do_resize=False,
+                return_tensors="pt"
+            )
+            prompt_inputs['norm_values'] = tmp_prompt_inputs['pixel_values']
+            prompt_inputs['norm_value_grid'] = tmp_prompt_inputs['image_grid_thw']
+            
+            prompt_inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in prompt_inputs.items()}
+
+            # continue
+            out = model.generate(eos_token_id=processor.tokenizer.eos_token_id, **prompt_inputs, **generation_args)
+            pred = tokenizer.decode(out[0], skip_special_tokens=False)
+            # print(pred)
+            pred = pred.split('assistant')[-1][1:]
+            # print(pred)
+            # label_index = batch['labels'][0]
+            # label_index = label_index[label_index!= -100]
+            label = labels.strip()
+            # print(label)
+            
+            qtype = qid.split('_')[0]
+            
+            a_label = label[0]
+            a_pred = pred[0]
+            inner_pred.append(a_pred)
+        # print(a_label, inner_pred)
         # if all_acc
+        a_pred = inner_pred[0]
         if a_label == a_pred:
             group_acc[qtype] += 1
             overall_acc[qtype[0]] += 1
             all_acc += 1
         group_cnt[qtype] += 1
         overall_cnt[qtype[0]] += 1
+
+        print('Acc: {:.2f}'.format(all_acc*100.0/(all_cnt+0.00001)))
 
         # print(label, pred)
         # print(a_label, a_pred)

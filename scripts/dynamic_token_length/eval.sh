@@ -11,9 +11,9 @@
 # You can use 2B instead of 7B
 # MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
 # MODEL_NAME="Qwen/Qwen2-VL-2B-Instruct"
-# MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
-
+MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
+# MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+export HOME=/playpen/pengjie_xinyu
 export PYTHONPATH=src:$PYTHONPATH
 export CUDA_VISIBLE_DEVICES=1
 # export CUDA_VISIBLE_DEVICES=5
@@ -33,11 +33,11 @@ n_norm=32 # 24
 n_flow=32 # 8
 multilevel_qformer=True
 image_resolution=224
-out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_3b_freeze_merge
+out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_3b_pretrain-336-1
 # output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_10/checkpoint-2000
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
-out_dir=lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_fullfinetune_7B/checkpoint-4266
+out_dir=lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_fullfinetune_3b_pretrain-336-1
 # deepspeed --master_port 29499 src/train/train_sft.py \
 #     --use_liger True \
 #     --lora_enable True \
@@ -96,7 +96,7 @@ out_dir=lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_fullfinetun
 
 python src/train/eval_sft.py \
     --use_liger True \
-    --lora_enable True \
+    --lora_enable False \
     --vision_lora True \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
@@ -105,8 +105,8 @@ python src/train/eval_sft.py \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
     --model_id $MODEL_NAME \
-    --data_path local_labels/val.json \
-    --model_path output/$out_dir \
+    --data_path local_labels/grpo_val.json \
+    --model_path output_local/$out_dir \
     --image_folder . \
     --remove_unused_columns False \
     --freeze_vision_tower True \
@@ -115,7 +115,7 @@ python src/train/eval_sft.py \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
-    --output_dir output/lora_vision_test \
+    --output_dir output_local/lora_vision_test \
     --num_train_epochs 1 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \

@@ -325,21 +325,7 @@ def process_vision_info_more(
                 text_inputs.append(vision_info['text'])
             else:
                 raise ValueError("image, image_url or video should in content.")
-        # if 'image'
-        # if "image" in vision_info or "image_url" in vision_info:
-        #     image_inputs.append(fetch_image(vision_info))
-        # elif "video" in vision_info:
-        #     video_input, video_sample_fps = fetch_video(vision_info, return_video_sample_fps=True)
-        #     video_sample_fps_list.append(video_sample_fps)
-        #     video_inputs.append(video_input)
-        # elif 'depth' in vision_info:
-        #     depth_inputs.append(fetch_image(vision_info))
-        # elif 'flow' in vision_info:
-        #     flow_inputs.append(fetch_image(vision_info))
-        # elif 'norm' in vision_info:
-        #     norm_inputs.append(fetch_image(vision_info))
-        # else:
-        #     raise ValueError("image, image_url or video should in content.")
+
     if len(image_inputs) == 0:
         image_inputs = None
     if len(video_inputs) == 0:

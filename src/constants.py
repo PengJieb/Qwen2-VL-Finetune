@@ -11,7 +11,7 @@ VISION_END_TOKEN = "<|vision_end|>"
 
 SYSTEM_MESSAGE = "You are a helpful assistant."
 
-GRPO_MESSAGE = "First output the thinking process in <think> </think> tags and then output the final answer in <answer> </answer> tags."
+GRPO_MESSAGE = "The user asks a question, and the assistant choose one option. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning process and answer are enclosed within <think> </think> and<answer> </answer> tags, respectively, i.e., <think> reasoning process here </think><answer> answer here </answer>."
 
 MULTIMODAL_KEYWORDS = ["pixel_values", 
                        "image_grid_thw", 

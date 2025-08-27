@@ -37,7 +37,7 @@ def accuracy_reward(completions, assistant, **kwargs):
                 # Compare the extracted answers
                 if student_answer[:1] == ground_truth[:1]:
                     reward += 0.3
-                if student_answer == ground_truth:
+                if student_answer[:5] == ground_truth[:5]:
                     reward += 0.7
             except Exception:
                 pass  # Keep reward as 0.0 if both methods fail

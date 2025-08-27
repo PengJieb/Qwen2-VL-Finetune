@@ -198,9 +198,9 @@ def train():
 
     processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_args.model_id, 
                                                             n_frames = model_args.n_image+model_args.n_depth+model_args.n_norm+model_args.n_flow)
-    for pn, p in model.named_parameters():
-        if p.requires_grad:
-            print(pn)
+    # for pn, p in model.named_parameters():
+    #     if p.requires_grad:
+    #         print(pn)
     # model.config.tokenizer_model_max_length = processor.tokenizer.model_max_length
 
     if training_args.bits in [4, 8]:
