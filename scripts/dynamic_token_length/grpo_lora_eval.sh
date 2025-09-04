@@ -34,8 +34,8 @@ n_depth=32 # 40
 n_norm=32 # 24
 n_flow=32 # 8
 multilevel_qformer=True
-image_resolution=336
-out_dir=output_local/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_3b_grpo-336/checkpoint-1707
+image_resolution=224
+out_dir=output_local/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_3b_grpo-336-2/checkpoint-1338
 sft_dir=output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_fullfinetune_3b_pretrain
 # output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_10/checkpoint-2000
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together

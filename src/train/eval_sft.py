@@ -89,7 +89,7 @@ def configure_llm(model, training_args):
 def process_vision_info_more(
     conversations: list[dict] | list[list[dict]],
     return_video_kwargs: bool = False,
-    n_frame = 4, is_random = True
+    n_frame = 10, is_random = True
 ):
 
     vision_infos = extract_vision_info(conversations)
@@ -143,7 +143,7 @@ def process_vision_info_more(
     # print(len(image_inputs), len(depth_inputs), len(norm_inputs), len(flow_inputs))
     return image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs
 
-def eva():
+def eval():
     parser = HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     
@@ -157,7 +157,7 @@ def eva():
                                                 device=training_args.device, use_flash_attn=not training_args.disable_flash_attn2,
                                                 n_image=model_args.n_image, n_depth=model_args.n_depth,
                                                 n_norm=model_args.n_norm, n_flow=model_args.n_flow, n_prefusion_layers=model_args.n_prefusion_layers,
-                                                multilevel_qformer=model_args.multilevel_qformer,
+                                                multilevel_qformer=model_args.multilevel_qformer, multilevel_mlp=model_args.multilevel_mlp,
                                                 lora_enable = lora_enable
                         )
 
@@ -205,7 +205,7 @@ def eva():
         inner_pred = []
         for j in range(n_times):
         
-            image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False)
+            image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False, is_random=False)
             video_inputs = None
             prompts_text = [
                 system_message + f"{DEFAULT_IM_START_TOKEN}{'user'}\n{replace_image_tokens(item)}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}assistant\n"
@@ -259,11 +259,11 @@ def eva():
             pred = tokenizer.decode(out[0], skip_special_tokens=False)
             # print(pred)
             pred = pred.split('assistant')[-1][1:]
-            # print(pred)
+            print(pred)
             # label_index = batch['labels'][0]
             # label_index = label_index[label_index!= -100]
             label = labels.strip()
-            # print(label)
+            print(label)
             
             qtype = qid.split('_')[0]
             
@@ -331,4 +331,4 @@ def eva():
 
 
 if __name__ == "__main__":
-    eva()
+    eval()

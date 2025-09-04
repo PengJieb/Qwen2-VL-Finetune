@@ -132,7 +132,7 @@ def train():
             **bnb_model_from_pretrained_args
         )
         # assign_qformer(model, ["image", 'depth', 'norm', 'flow'], 256//4)
-        assign_qformer(model, {"image": model_args.n_image, 'depth': model_args.n_depth, 'norm': model_args.n_norm, 'flow': model_args.n_flow}, model_args.multilevel_qformer)
+        assign_qformer(model, {"image": model_args.n_image, 'depth': model_args.n_depth, 'norm': model_args.n_norm, 'flow': model_args.n_flow}, model_args.multilevel_qformer, model_args.multilevel_mlp)
         assign_prefusion(model, model_args.n_prefusion_layers)
     else:
         model = Qwen2VLForConditionalGeneration.from_pretrained(

@@ -453,15 +453,15 @@ class GRPODatasetNextQAEval(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
                 
-            total_count = len(image_files)
-            sample_count = 10
-            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
-            indices = sorted(list(set(indices)))
-            saved_files = []
-            for i, file in enumerate(image_files):
-                if i in indices:
-                    saved_files.append(file)
-            image_files = saved_files
+            # total_count = len(image_files)
+            # sample_count = 10
+            # indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            # indices = sorted(list(set(indices)))
+            # saved_files = []
+            # for i, file in enumerate(image_files):
+            #     if i in indices:
+            #         saved_files.append(file)
+            # image_files = saved_files
             
             for image_file in image_files:
                 if not os.path.exists(image_file):
@@ -490,16 +490,16 @@ class GRPODatasetNextQAEval(Dataset):
 
             if isinstance(image_files, str):
                 image_files = [image_files]
-            depth = []
-            total_count = len(image_files)
-            sample_count = 10
-            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
-            indices = sorted(list(set(indices)))
-            saved_files = []
-            for i, file in enumerate(image_files):
-                if i in indices:
-                    saved_files.append(file)
-            image_files = saved_files
+            # depth = []
+            # total_count = len(image_files)
+            # sample_count = 10
+            # indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            # indices = sorted(list(set(indices)))
+            # saved_files = []
+            # for i, file in enumerate(image_files):
+            #     if i in indices:
+            #         saved_files.append(file)
+            # image_files = saved_files
             
             for image_file in image_files:
                 if not os.path.exists(image_file):
@@ -517,16 +517,16 @@ class GRPODatasetNextQAEval(Dataset):
 
             if isinstance(image_files, str):
                 image_files = [image_files]
-            flow = []
-            total_count = len(image_files)
-            sample_count = 10
-            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
-            indices = sorted(list(set(indices)))
-            saved_files = []
-            for i, file in enumerate(image_files):
-                if i in indices:
-                    saved_files.append(file)
-            image_files = saved_files
+            # flow = []
+            # total_count = len(image_files)
+            # sample_count = 10
+            # indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            # indices = sorted(list(set(indices)))
+            # saved_files = []
+            # for i, file in enumerate(image_files):
+            #     if i in indices:
+            #         saved_files.append(file)
+            # image_files = saved_files
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
@@ -544,15 +544,15 @@ class GRPODatasetNextQAEval(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             norm = []
-            total_count = len(image_files)
-            sample_count = 10
-            indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
-            indices = sorted(list(set(indices)))
-            saved_files = []
-            for i, file in enumerate(image_files):
-                if i in indices:
-                    saved_files.append(file)
-            image_files = saved_files
+            # total_count = len(image_files)
+            # sample_count = 10
+            # indices = [int(i * (total_count - 1) / (sample_count - 1)) for i in range(sample_count)]
+            # indices = sorted(list(set(indices)))
+            # saved_files = []
+            # for i, file in enumerate(image_files):
+            #     if i in indices:
+            #         saved_files.append(file)
+            # image_files = saved_files
             for image_file in image_files:
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):

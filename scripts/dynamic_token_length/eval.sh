@@ -15,7 +15,7 @@ MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 # MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 export HOME=/playpen/pengjie_xinyu
 export PYTHONPATH=src:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=4
 # export CUDA_VISIBLE_DEVICES=5
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
@@ -31,13 +31,14 @@ n_image=32 # 56 64/
 n_depth=32 # 40
 n_norm=32 # 24
 n_flow=32 # 8
-multilevel_qformer=True
+multilevel_qformer=False
+multilevel_mlp=True
 image_resolution=224
 out_dir=lora_vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_3b_pretrain-336-1
 # output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_10/checkpoint-2000
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
-out_dir=lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_fullfinetune_3b_pretrain-336-1
+out_dir=output_local/vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_3b_lora
 # deepspeed --master_port 29499 src/train/train_sft.py \
 #     --use_liger True \
 #     --lora_enable True \
@@ -96,8 +97,8 @@ out_dir=lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_fullfinetun
 
 python src/train/eval_sft.py \
     --use_liger True \
-    --lora_enable False \
-    --vision_lora True \
+    --lora_enable True \
+    --vision_lora False \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
     --lora_rank 64 \
@@ -106,7 +107,7 @@ python src/train/eval_sft.py \
     --num_lora_modules -1 \
     --model_id $MODEL_NAME \
     --data_path local_labels/grpo_val.json \
-    --model_path output_local/$out_dir \
+    --model_path $out_dir \
     --image_folder . \
     --remove_unused_columns False \
     --freeze_vision_tower True \
@@ -141,3 +142,4 @@ python src/train/eval_sft.py \
     --n_norm $n_norm \
     --n_flow $n_flow \
     --multilevel_qformer $multilevel_qformer \
+    --multilevel_mlp $multilevel_mlp \

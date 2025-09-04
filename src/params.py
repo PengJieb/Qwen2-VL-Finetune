@@ -17,6 +17,7 @@ class ModelArguments:
     n_flow: int = field(default=64)
     n_prefusion_layers: int = field(default=3)
     multilevel_qformer: bool = field(default=False)
+    multilevel_mlp: bool = field(default=False)
 
 @dataclass
 class TrainingArguments(HFTrainingArguments):

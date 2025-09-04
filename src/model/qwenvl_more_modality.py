@@ -10,6 +10,7 @@ Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查�
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+from torch import einsum
 from torch.nn import CrossEntropyLoss
 import torch.nn as nn
 
@@ -127,7 +128,7 @@ class MultiLevelQFormerEncoder(nn.Module):
         self.mlp = Mlp(in_features=embed_dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x:torch.Tensor, rank):
-
+        
         x = self.context_proj(self.context_norm(x))
         
         B, C, D = x.shape
@@ -136,6 +137,56 @@ class MultiLevelQFormerEncoder(nn.Module):
         x = query + self.attn(self.norm1(query), x)
         x = x + self.mlp(self.norm2(x))
         return x
+
+class MultiLevelCompression(nn.Module):
+    # MultiLevel Token Leaner
+    def __init__(self, feature_size, num_patches, n_modality, embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, act_layer=nn.GELU):
+        super().__init__()
+        n_unite = num_patches // n_modality
+        self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        # self.query_tokens = nn.Parameter(torch.randn(num_patches, embed_dim))
+        # self.query_tokens = nn.Parameter(torch.randn(self.n_patch_list[-1], embed_dim))
+
+
+        self.context_norm = nn.LayerNorm(feature_size)
+        self.context_proj = nn.Linear(feature_size, embed_dim)
+        
+        rank_mlp = {}
+        n_origin_tokens = int(64 * 10)
+        mlp_hidden_dim = int(embed_dim * mlp_ratio)
+        # for i, n_patch in enumerate(self.n_patch_list):
+        #     rank_mlp[f"{i}"] = Mlp(n_origin_tokens, mlp_hidden_dim, n_patch, act_layer=act_layer, drop=drop)
+        self.rank_mlp = Mlp(n_origin_tokens, mlp_hidden_dim, self.n_patch_list[-1], act_layer=act_layer, drop=drop)
+        
+        # self.norm1 = nn.LayerNorm(embed_dim)
+        # self.attn = Attention(embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        # # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        # self.norm2 = nn.LayerNorm(embed_dim)
+        # mlp_hidden_dim = int(embed_dim * mlp_ratio)
+
+        # self.mlp = Mlp(in_features=embed_dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, x:torch.Tensor, rank):
+        inputs = self.context_norm(x)
+        x = self.context_proj(inputs)
+        
+        B, C, D = x.shape
+        x = x.permute(0, 2, 1) # B, D, C
+        x = self.rank_mlp(x)
+        attn = x[:,:,:self.n_patch_list[rank]]
+        # for i_r in self.rank_mlp:
+        #     i_x = self.rank_mlp[f"{i_r}"](x)
+        #     if f"{i_r}" == f"{rank}":
+        #         attn= i_x
+        attn = attn.softmax(dim=-2)
+        # print(inputs.shape, x.shape, attn.shape)
+        # out = attn.permute(0, 2, 1)
+        out = einsum("... d i, ... n d -> ... i d", attn, inputs)
+        # x = x.permute(0, 2, 1)
+        # print(out.shape, x.shape)
+        return out
+
+
 
 class Qwen2_5_VLProcessorOneToken(Qwen2_5_VLProcessor):
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, n_frames = 4, **kwargs):
@@ -244,6 +295,7 @@ def get_rank_order(input_tensor, descending=False):
 class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config, eval_model=False,
                  n_image=4, n_depth=4, n_norm=4, n_flow=4, multilevel_qformer=True,
+                 multilevel_mlp = False,
                  n_prefusion_layers=1):
         super().__init__(config)
         self.config = config
@@ -256,7 +308,7 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
         # print(n_image, n_depth, n_norm, n_flow, multilevel_qformer, n_prefusion_layers)
         if eval_model:
             assign_qformer(self, {"image": n_image, 'depth': n_depth, 'norm': n_norm, 'flow': n_flow},
-                           multilevel_qformer=multilevel_qformer)
+                           multilevel_qformer=multilevel_qformer, multilevel_mlp = multilevel_mlp)
             assign_prefusion(self, n_prefusion_layers)
     
     @add_start_docstrings_to_model_forward(QWEN2_5_VL_INPUTS_DOCSTRING)
@@ -715,11 +767,16 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
             return position_ids, mrope_position_deltas
 
 
-def assign_qformer(model: Qwen2_5_VLForConditionalGenerationMore, modalities, multilevel_qformer = False):
+def assign_qformer(model: Qwen2_5_VLForConditionalGenerationMore, modalities, multilevel_qformer = False, multilevel_mlp = False):
     model_dict = nn.ModuleDict()
     for mm in modalities:
         if multilevel_qformer:
             model_dict[mm] = MultiLevelQFormerEncoder(
+                model.config.hidden_size, modalities[mm], len(modalities), model.config.hidden_size
+            )
+        elif multilevel_mlp:
+            # print("Use Multi-Level MLP", '!'*40)
+            model_dict[mm] = MultiLevelCompression(
                 model.config.hidden_size, modalities[mm], len(modalities), model.config.hidden_size
             )
         else:
