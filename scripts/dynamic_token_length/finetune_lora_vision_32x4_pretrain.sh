@@ -15,15 +15,15 @@ MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 # MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 export HOME=/playpen/pengjie_xinyu
 export PYTHONPATH=src:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=4,5
-# export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=5
 export NCCL_P2P_DISABLE=0
 export NCCL_IB_DISABLE=0
 # export HF_ENDPOINT=https://hf-mirror.com
 
 GLOBAL_BATCH_SIZE=16
-BATCH_PER_DEVICE=4
-NUM_DEVICES=2
+BATCH_PER_DEVICE=1
+NUM_DEVICES=4
 GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
 PROJ_ROOT=$(pwd)
 # 112, 80, 48, 16
@@ -31,17 +31,17 @@ n_image=32 # 56 64/
 n_depth=32 # 40
 n_norm=32 # 24
 n_flow=32 # 8
-multilevel_qformer=False
-multilevel_mlp=True
-image_resolution=224
-out_dir=vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_fullfinetune_3b_non_lora
+multilevel_qformer=True
+multilevel_mlp=False
+image_resolution=448
+out_dir=vision_test_${n_image}_${n_depth}_${n_norm}_${n_flow}_token_dynamic_full_crema_policy_test
 # output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_10/checkpoint-2000
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
-
-deepspeed --master_port 25900 src/train/train_sft.py \
+# export CUDA_LAUNCH_BLOCKING=1
+deepspeed --master_port 25901 src/train/train_sft.py \
     --use_liger True \
-    --lora_enable False \
+    --lora_enable True \
     --vision_lora False \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
@@ -51,7 +51,7 @@ deepspeed --master_port 25900 src/train/train_sft.py \
     --num_lora_modules -1 \
     --deepspeed scripts/zero2.json \
     --model_id $MODEL_NAME \
-    --data_path local_labels/grpo_training.json \
+    --data_path local_labels/train_subset.json \
     --image_folder . \
     --remove_unused_columns False \
     --freeze_vision_tower True \
@@ -60,7 +60,7 @@ deepspeed --master_port 25900 src/train/train_sft.py \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
-    --output_dir output_local/$out_dir \
+    --output_dir train_output/$out_dir \
     --num_train_epochs 2 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
@@ -72,74 +72,25 @@ deepspeed --master_port 25900 src/train/train_sft.py \
     --weight_decay 0.1 \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 120 \
+    --logging_steps 5 \
     --tf32 True \
     --gradient_checkpointing True \
     --report_to tensorboard \
     --lazy_preprocess True \
     --save_strategy "steps" \
-    --save_steps 5000 \
+    --save_steps 2000 \
     --save_total_limit 1 \
     --dataloader_num_workers 8 \
     --n_image $n_image \
     --n_depth $n_depth \
     --n_norm $n_norm \
     --n_flow $n_flow \
-    --multilevel_qformer $multilevel_qformer \
-    --multilevel_mlp $multilevel_mlp \
+    --modality_ranker "attention" \
+    --learnable_attention True \
+    --n_prefusion_layers 3 \
+    --only_self_attention False \
+    --token_pruning_method "qformer" \
+    --discrete_token_number True \
+    --token_distribution "decrease" \
+    --parameterized_pooling True \
 
-cd output_local/$out_dir
-highest_checkpoint=$(ls | grep '^checkpoint-' | sed 's/^checkpoint-//' | sort -nr | head -1)
-echo "Highest checkpoint: $highest_checkpoint"
-rm non_lora_state_dict.bin
-ln -s $PROJ_ROOT/output_local/$out_dir/checkpoint-$highest_checkpoint/non_lora_state_dict.bin non_lora_state_dict.bin
-cd -
-
-python src/train/eval_sft.py \
-    --use_liger True \
-    --lora_enable False \
-    --vision_lora False \
-    --use_dora False \
-    --lora_namespan_exclude "['lm_head', 'embed_tokens', 'm_qformer']" \
-    --lora_rank 64 \
-    --lora_alpha 64 \
-    --lora_dropout 0.05 \
-    --num_lora_modules -1 \
-    --model_id $MODEL_NAME \
-    --data_path local_labels/grpo_val.json \
-    --model_path output_local/$out_dir \
-    --image_folder . \
-    --remove_unused_columns False \
-    --freeze_vision_tower True \
-    --freeze_llm False \
-    --freeze_merger True \
-    --bf16 True \
-    --fp16 False \
-    --disable_flash_attn2 False \
-    --output_dir output_local/lora_vision_test \
-    --num_train_epochs 1 \
-    --per_device_train_batch_size $BATCH_PER_DEVICE \
-    --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
-    --image_min_pixels $((256 * 28 * 28)) \
-    --image_max_pixels $((256 * 28 * 28)) \
-    --image_resized_width $image_resolution \
-    --image_resized_height $image_resolution \
-    --learning_rate 2e-4 \
-    --weight_decay 0.1 \
-    --warmup_ratio 0.03 \
-    --lr_scheduler_type "cosine" \
-    --logging_steps 1 \
-    --tf32 True \
-    --gradient_checkpointing True \
-    --report_to tensorboard \
-    --lazy_preprocess True \
-    --save_strategy "steps" \
-    --save_steps 200 \
-    --save_total_limit 10 \
-    --dataloader_num_workers 4 \
-    --n_image $n_image \
-    --n_depth $n_depth \
-    --n_norm $n_norm \
-    --n_flow $n_flow \
-    --multilevel_qformer $multilevel_qformer \
-    --multilevel_mlp $multilevel_mlp \

@@ -3,9 +3,9 @@ import torch
 from peft import LoraConfig, get_peft_model
 import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
-from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMore, assign_qformer, Qwen2_5_VLProcessorOneToken, assign_prefusion
+from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMoreSA3D, assign_qformer, Qwen2_5_VLProcessorOneToken, assign_prefusion
 from src.trainer import QwenSFTTrainer
-from src.dataset import make_supervised_data_module
+from src.dataset import make_supervised_sqa3d_data_module
 from src.params import DataArguments, ModelArguments, TrainingArguments
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 import pathlib
@@ -129,7 +129,7 @@ def train():
             'image': model_args.n_image,
             'depth': model_args.n_depth,
             'norm': model_args.n_norm,
-            'flow': model_args.n_flow,
+            'pc': model_args.n_pc,
             'modality_ranker': model_args.modality_ranker,
             'discrete_token_number': model_args.discrete_token_number,
             'token_distribution': model_args.token_distribution,
@@ -139,20 +139,16 @@ def train():
             'token_pruning_method': model_args.token_pruning_method,
             'cosine_sim_drop': model_args.cosine_sim_drop,
             'parameterized_pooling': model_args.parameterized_pooling,
-            'modality_list': ['image', 'depth', 'norm', 'flow']
+            "n_original_tokens": model_args.n_original_tokens,
+            'modality_list': ['image', 'depth', 'norm', 'pc']
         }
-        model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(
+        model = Qwen2_5_VLForConditionalGenerationMoreSA3D.from_pretrained(
             model_args.model_id,
             torch_dtype=compute_dtype,
             attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
             more_config=more_config,
             **bnb_model_from_pretrained_args
         )
-        # assign_qformer(model, ["image", 'depth', 'norm', 'flow'], 256//4)
-        # assign_qformer(model, {"image": model_args.n_image, 'depth': model_args.n_depth, 'norm': model_args.n_norm, 'flow': model_args.n_flow}, model_args.multilevel_qformer, model_args.multilevel_mlp)
-        # assign_prefusion(model, model_args.n_prefusion_layers)
-        # if model_args.model_path is not None:
-        #     model.from_pretrained(model_args.model_path, ignore_mismatched_sizes=True)
         
         
     elif "Phi" in model_args.model_id:
@@ -248,7 +244,7 @@ def train():
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    data_module = make_supervised_data_module(model_id=model_args.model_id,
+    data_module = make_supervised_sqa3d_data_module(model_id=model_args.model_id,
                                               processor=processor,
                                               data_args=data_args)
 

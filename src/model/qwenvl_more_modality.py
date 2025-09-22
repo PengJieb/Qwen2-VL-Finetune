@@ -13,7 +13,7 @@ import torch
 from torch import einsum
 from torch.nn import CrossEntropyLoss
 import torch.nn as nn
-
+import torch.nn.functional as F
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration, _CONFIG_FOR_DOC, Qwen2_5_VLDecoderLayer
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 
@@ -23,6 +23,12 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.image_utils import ImageInput, VideoInput
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.processing_utils import ImagesKwargs, ProcessingKwargs, ProcessorMixin, Unpack, VideosKwargs
+from positional_encodings.torch_encodings import PositionalEncoding1D
+import random
+
+import numpy as np
+
+# from transformers.models.phi3.modeling_phi3 import Phi3
 
 
 class Attention(nn.Module):
@@ -54,7 +60,7 @@ class Attention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, attn
 
 class Mlp(nn.Module):
     """ MLP as used in Vision Transformer, MLP-Mixer and related networks
@@ -103,15 +109,27 @@ class QFormerEncoder(nn.Module):
         B, C, D = x.shape
         
         query = self.query_tokens.unsqueeze(0).repeat(B, 1, 1)
-        x = query + self.attn(self.norm1(query), x)
+        x = query + self.attn(self.norm1(query), x)[0]
         x = x + self.mlp(self.norm2(x))
         return x
 
 class MultiLevelQFormerEncoder(nn.Module):
-    def __init__(self, feature_size, num_patches, n_modality, embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, act_layer=nn.GELU):
+    def __init__(self, feature_size, num_patches, n_modality, embed_dim, 
+                 attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, 
+                 act_layer=nn.GELU, more_config={}):
         super().__init__()
         n_unite = num_patches // n_modality
-        self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        self.more_config = more_config
+        if self.more_config['token_distribution'] == 'top-1':
+            self.n_patch_list = [num_patches//2 if i < n_modality-1 else num_patches + num_patches//2 * (n_modality-1) for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-2':
+            self.n_patch_list = [num_patches//2 if i < n_modality-2 else num_patches + num_patches//2 for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-3':
+            self.n_patch_list = [n_unite if i==0 else num_patches + n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and self.more_config['discrete_token_number']:
+            self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and not self.more_config['discrete_token_number']:
+            self.n_patch_list = [num_patches * n_modality for i in range(n_modality)]
         # self.query_tokens = nn.Parameter(torch.randn(num_patches, embed_dim))
         self.query_tokens = nn.Parameter(torch.randn(self.n_patch_list[-1], embed_dim))
 
@@ -127,23 +145,43 @@ class MultiLevelQFormerEncoder(nn.Module):
 
         self.mlp = Mlp(in_features=embed_dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
+        # self.n_patch_list = [56, 24, 24, 24]
+
     def forward(self, x:torch.Tensor, rank):
         
         x = self.context_proj(self.context_norm(x))
         
         B, C, D = x.shape
-        
-        query = self.query_tokens[:self.n_patch_list[rank]].unsqueeze(0).repeat(B, 1, 1)
-        x = query + self.attn(self.norm1(query), x)
+        if not self.more_config['discrete_token_number']:
+            query = self.query_tokens[:rank].unsqueeze(0).repeat(B, 1, 1)
+        else:
+            query = self.query_tokens[:self.n_patch_list[rank]].unsqueeze(0).repeat(B, 1, 1)
+        x = query + self.attn(self.norm1(query), x)[0]
         x = x + self.mlp(self.norm2(x))
         return x
 
+
+
 class MultiLevelCompression(nn.Module):
     # MultiLevel Token Leaner
-    def __init__(self, feature_size, num_patches, n_modality, embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, act_layer=nn.GELU):
+    def __init__(self, feature_size, num_patches, n_modality, 
+                 embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, 
+                 act_layer=nn.GELU, origin_tokens = None, more_config = {}):
         super().__init__()
         n_unite = num_patches // n_modality
-        self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        # self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        n_unite = num_patches // n_modality
+        self.more_config = more_config
+        if self.more_config['token_distribution'] == 'top-1':
+            self.n_patch_list = [num_patches//2 if i < n_modality-1 else num_patches + num_patches//2 * (n_modality-1) for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-2':
+            self.n_patch_list = [num_patches//2 if i < n_modality-2 else num_patches + num_patches//2 for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-3':
+            self.n_patch_list = [n_unite if i==0 else num_patches + n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and self.more_config['discrete_token_number']:
+            self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and not self.more_config['discrete_token_number']:
+            self.n_patch_list = [num_patches * n_modality for i in range(n_modality)]
         # self.query_tokens = nn.Parameter(torch.randn(num_patches, embed_dim))
         # self.query_tokens = nn.Parameter(torch.randn(self.n_patch_list[-1], embed_dim))
 
@@ -152,7 +190,7 @@ class MultiLevelCompression(nn.Module):
         self.context_proj = nn.Linear(feature_size, embed_dim)
         
         rank_mlp = {}
-        n_origin_tokens = int(64 * 10)
+        n_origin_tokens = int(256 * 10) if origin_tokens is None else origin_tokens
         mlp_hidden_dim = int(embed_dim * mlp_ratio)
         # for i, n_patch in enumerate(self.n_patch_list):
         #     rank_mlp[f"{i}"] = Mlp(n_origin_tokens, mlp_hidden_dim, n_patch, act_layer=act_layer, drop=drop)
@@ -173,11 +211,15 @@ class MultiLevelCompression(nn.Module):
         B, C, D = x.shape
         x = x.permute(0, 2, 1) # B, D, C
         x = self.rank_mlp(x)
-        attn = x[:,:,:self.n_patch_list[rank]]
+        if not self.more_config['discrete_token_number']:
+            attn = x[:,:,:rank]
+        else:
+            attn = x[:,:,:self.n_patch_list[rank]]
         # for i_r in self.rank_mlp:
         #     i_x = self.rank_mlp[f"{i_r}"](x)
         #     if f"{i_r}" == f"{rank}":
         #         attn= i_x
+        return attn.permute(0, 2, 1)
         attn = attn.softmax(dim=-2)
         # print(inputs.shape, x.shape, attn.shape)
         # out = attn.permute(0, 2, 1)
@@ -186,7 +228,248 @@ class MultiLevelCompression(nn.Module):
         # print(out.shape, x.shape)
         return out
 
+class LinearPoolingParameterFree(nn.Module):
+    def __init__(self, feature_size, num_patches, n_modality, 
+                 embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, 
+                 act_layer=nn.GELU, more_config = {}):
+        super().__init__()
+        n_unite = num_patches // n_modality
+        self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        self.more_config = more_config
+        if self.more_config['token_distribution'] == 'top-1':
+            self.n_patch_list = [num_patches//2 if i < n_modality-1 else num_patches + num_patches//2 * (n_modality-1) for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-2':
+            self.n_patch_list = [num_patches//2 if i < n_modality-2 else num_patches + num_patches//2 for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-3':
+            self.n_patch_list = [n_unite if i==0 else num_patches + n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and self.more_config['discrete_token_number']:
+            self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and not self.more_config['discrete_token_number']:
+            self.n_patch_list = [num_patches * n_modality for i in range(n_modality)]
+        
+    def forward(self, x:torch.Tensor, rank):
+        if not self.more_config['discrete_token_number']:
+            n_target= rank
+        else:
+            n_target = self.n_patch_list[rank]
+        
+        n_window_size = x.shape[1]//n_target
+        
+        split_list = x[:,:n_window_size*(n_target-1)].split([n_window_size for _ in range(n_target-1)], dim=1)
+        x_remain = x[:,n_window_size*(n_target-1):]
+        n_ret = []
+        for item in split_list:
+            n_ret.append(
+                item.mean(dim=1, keepdim=True)
+            )
+        n_ret.append(x_remain.mean(dim=1,keepdim=True))
+        return torch.cat(n_ret, dim=1)
 
+
+@torch.no_grad()
+def memory_efficient_kmeans_cosine(features, num_clusters, sample_ratio=0.3, 
+                                  batch_size=1024, max_iter=100, tol=1e-4):
+    N, D = features.shape
+    device = features.device
+    dtype = features.dtype
+    
+    features = F.normalize(features, p=2, dim=1)
+    
+    sample_size = max(num_clusters * 2, int(N * sample_ratio)) 
+    sample_indices = torch.randperm(N, device=device)[:sample_size]
+    sample_features = features[sample_indices]
+    
+    with torch.no_grad(): 
+        indices = torch.randperm(sample_size, device=device)[:num_clusters]
+        centers = sample_features[indices].clone()
+
+        for _ in range(50):
+            similarity = torch.matmul(sample_features, centers.t())
+            labels_sample = torch.argmax(similarity, dim=1)
+
+            for c in range(num_clusters):
+                mask = (labels_sample == c)
+                if mask.sum() > 0:
+                    centers[c] = torch.mean(sample_features[mask], dim=0)
+                    centers[c] = F.normalize(centers[c], p=2, dim=0)
+
+    labels = torch.zeros(N, device=device, dtype=torch.long)
+    num_batches = (N + batch_size - 1) // batch_size  # 计算总批次数
+    
+    for b in range(num_batches):
+        start = b * batch_size
+        end = min((b + 1) * batch_size, N)
+        batch_features = features[start:end]
+
+        similarity = torch.matmul(batch_features, centers.t())
+        batch_labels = torch.argmax(similarity, dim=1)
+        labels[start:end] = batch_labels
+
+    prev_centers = centers.clone()
+    
+    for _ in range(max_iter):
+        cluster_counts = torch.zeros(num_clusters, device=device, dtype=torch.float32)
+        cluster_sums = torch.zeros(num_clusters, D, device=device, dtype=dtype)
+        
+        for b in range(num_batches):
+            start = b * batch_size
+            end = min((b + 1) * batch_size, N)
+            batch_features = features[start:end]
+            batch_labels = labels[start:end]
+
+            for c in range(num_clusters):
+                mask = (batch_labels == c)
+                if mask.sum() > 0:
+                    cluster_counts[c] += mask.sum()
+                    cluster_sums[c] += torch.sum(batch_features[mask], dim=0)
+
+        for c in range(num_clusters):
+            if cluster_counts[c] > 0:
+                centers[c] = cluster_sums[c] / cluster_counts[c]
+                centers[c] = F.normalize(centers[c], p=2, dim=0)
+
+            
+
+        for b in range(num_batches):
+            start = b * batch_size
+            end = min((b + 1) * batch_size, N)
+            batch_features = features[start:end]
+            
+            similarity = torch.matmul(batch_features, centers.t())
+            batch_labels = torch.argmax(similarity, dim=1)
+            labels[start:end] = batch_labels
+        
+
+        center_diff = torch.norm(centers - prev_centers, dim=1).mean()
+        if center_diff < tol:
+            break
+        prev_centers = centers.clone()
+    
+    return labels, centers
+
+class CosineSimilarityPruning(nn.Module):
+    def __init__(self, feature_size, num_patches, n_modality, 
+                 embed_dim, attn_drop=0.25, drop = 0.25, num_heads=4, qkv_bias=False, mlp_ratio = 4, 
+                 act_layer=nn.GELU, more_config = {}):
+        super().__init__()
+        n_unite = num_patches // n_modality
+        self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        self.more_config = more_config
+        if self.more_config['token_distribution'] == 'top-1':
+            self.n_patch_list = [num_patches//2 if i < n_modality-1 else num_patches + num_patches//2 * (n_modality-1) for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-2':
+            self.n_patch_list = [num_patches//2 if i < n_modality-2 else num_patches + num_patches//2 for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'top-3':
+            self.n_patch_list = [n_unite if i==0 else num_patches + n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and self.more_config['discrete_token_number']:
+            self.n_patch_list = [n_unite + 2 * i * n_unite for i in range(n_modality)]
+        elif self.more_config['token_distribution'] == 'decrease' and not self.more_config['discrete_token_number']:
+            self.n_patch_list = [num_patches * n_modality for i in range(n_modality)]
+        
+    def forward(self, x:torch.Tensor, rank):
+        if not self.more_config['discrete_token_number']:
+            n_target=rank
+        else:
+            n_target = self.n_patch_list[rank]
+        
+        B, L, D = x.shape
+        if n_target > L:
+            return x
+        
+        cluster_labels = []
+        cluster_centers = []
+        
+        for b in range(B):
+            batch_tokens = x[b]
+            
+            labels, centers = memory_efficient_kmeans_cosine(
+                batch_tokens,
+                n_target,
+                sample_ratio=0.1,
+                batch_size=1024,
+                max_iter=100,
+                tol=1e-4
+            )
+            cluster_centers.append(centers)
+        return torch.stack(cluster_centers)
+
+def average_cosine_similarity(tokens, block_size=1024):
+
+    B, L, D = tokens.shape
+    device = tokens.device
+    avg_sims = torch.zeros(B, device=device)
+    
+    norm_tokens = F.normalize(tokens, p=2, dim=2)  
+    
+    for b in range(B):
+        seq = norm_tokens[b]  
+        total_sim = 0.0
+        total_pairs = 0
+        
+        if L < 2:
+            avg_sims[b] = 1.0
+            continue
+        
+        num_blocks = (L + block_size - 1) // block_size
+        
+        for i_block in range(num_blocks):
+            i_start = i_block * block_size
+            i_end = min((i_block + 1) * block_size, L)
+            current_block = seq[i_start:i_end]
+            
+            for j_block in range(i_block, num_blocks):
+                j_start = j_block * block_size
+                j_end = min((j_block + 1) * block_size, L)
+                
+                if i_block == j_block:
+                    j_start = max(j_start, i_start + 1)
+                    if j_start >= j_end:
+                        continue
+                    other_block = seq[j_start:j_end]  
+                    sims = torch.matmul(current_block, other_block.T)  # (i_block_size, j_block_size)
+                else:
+                    other_block = seq[j_start:j_end]  # (j_block_size, D)
+                    sims = torch.matmul(current_block, other_block.T)  # (i_block_size, j_block_size)
+                
+                total_sim += sims.sum()
+                total_pairs += sims.numel()
+        
+        avg_sims[b] = 1 - total_sim / total_pairs if total_pairs > 0 else 0.0
+    
+    return avg_sims
+
+class CosineSimilarityRedundancy(nn.Module):
+    def __init__(self):
+        super().__init__()
+ 
+    def forward(self, x:List[torch.Tensor],):
+
+        cluster_results = []
+        for item in x:
+            cluster_results.append(
+                average_cosine_similarity(item).unsqueeze(dim=-1)
+            )
+        return torch.cat(cluster_results, dim=-1) # B, M
+
+
+class RandomOrder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        
+    def forward(self, x:List[torch.Tensor],):
+
+        # cluster_results = []
+        n_modality = len(x)
+        batch_size = x[0].shape[0]
+        
+        alpha = torch.ones(n_modality, device=x[0].device)
+        dirichlet = torch.distributions.Dirichlet(alpha)
+        batch_tensor = torch.stack([
+            dirichlet.sample() for _ in range(batch_size)
+        ])
+        # print(batch_tensor)
+        return batch_tensor # B, M
 
 class Qwen2_5_VLProcessorOneToken(Qwen2_5_VLProcessor):
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, n_frames = 4, **kwargs):
@@ -292,13 +575,46 @@ def get_rank_order(input_tensor, descending=False):
     
     return rank_order
 
+
+# class Phi3VLCausalGeneratioMore(Phi3VLCausalGeneratio):
+#     def
+
+
+def token_budgets_from_weight(weights, total_token_budgets):
+    # weights: batch, n_modality
+    batch_size, n_modality = weights.shape
+    sum_weights = weights.sum(dim=1, keepdim=True)
+    sum_weights = torch.where(sum_weights == 0, 
+                             torch.tensor(n_modality, device=weights.device, dtype=sum_weights.dtype), 
+                             sum_weights)
+    
+    base_budget = 2
+    remaining_budget = total_token_budgets - base_budget * n_modality
+    
+    proportions = weights / sum_weights
+    budgets_float = proportions * remaining_budget
+    budgets_int = torch.floor(budgets_float).to(torch.int32)
+    total_allocated = budgets_int.sum(dim=1)
+    diff = remaining_budget - total_allocated
+    # for i in range(batch_size):
+    #     current_diff = max(0, diff[i].item())
+    #     if diff[i] <= 0:
+    #         continue
+    #     fractional = budgets_float[i] - budgets_int[i].to(budgets_float.dtype)
+    #     k = min(current_diff, n_modality)
+    #     _, top_indices = torch.topk(fractional, k=k)
+    #     budgets_int[i, top_indices] += 1
+    final_budgets = budgets_int + base_budget
+    final_budgets[:,-1] += diff
+    # print(final_budgets.sum(dim=1), final_budgets)
+    
+    return final_budgets
+
 class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration):
-    def __init__(self, config, eval_model=False,
-                 n_image=4, n_depth=4, n_norm=4, n_flow=4, multilevel_qformer=True,
-                 multilevel_mlp = False,
-                 n_prefusion_layers=1):
+    def __init__(self, config, more_config):
         super().__init__(config)
         self.config = config
+        self.more_config = more_config
         # self.n_per_img = n_per_img
         # self.n_prefusion_layers = n_prefusion_layers
         # self.multilevel_qformer = config.multilevel_qformer
@@ -306,10 +622,10 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
         #     assign_qformer(self, modalities, multilevel_qformer)
         #     assign_prefusion(self, n_prefusion_layers)
         # print(n_image, n_depth, n_norm, n_flow, multilevel_qformer, n_prefusion_layers)
-        if eval_model:
-            assign_qformer(self, {"image": n_image, 'depth': n_depth, 'norm': n_norm, 'flow': n_flow},
-                           multilevel_qformer=multilevel_qformer, multilevel_mlp = multilevel_mlp)
-            assign_prefusion(self, n_prefusion_layers)
+        self.total_multimodal_budgets = [self.more_config[mm] for mm in self.more_config['modality_list']]
+        self.total_multimodal_budgets = sum(self.total_multimodal_budgets)
+        assign_qformer(self, more_config)
+        assign_prefusion(self, more_config)
     
     @add_start_docstrings_to_model_forward(QWEN2_5_VL_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=Qwen2_5_VLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
@@ -387,8 +703,7 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
             inputs_embeds = self.model.embed_tokens(input_ids)
             if pixel_values is not None:
                 pixel_values = pixel_values.type(self.visual.dtype)
-                # print(pixel_values.shape, depth_values.shape, flow_values.shape, norm_values.shape, image_grid_thw.shape)
-                # print(image_grid_thw)
+
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 depth_embeds = self.visual(depth_values, grid_thw=image_grid_thw)
                 flow_embeds = self.visual(flow_values, grid_thw=image_grid_thw)
@@ -403,12 +718,7 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 depth_embeds = depth_embeds.reshape(n_batch, -1, depth_embeds.shape[-1])
                 flow_embeds = flow_embeds.reshape(n_batch, -1, flow_embeds.shape[-1])
                 norm_embeds = norm_embeds.reshape(n_batch, -1, norm_embeds.shape[-1])
-                
-                # compressed_image_embeds = self.m_qformer['image'](image_embeds)
-                # compressed_depth_embeds = self.m_qformer['depth'](depth_embeds)
-                # compressed_flow_embeds = self.m_qformer['flow'](flow_embeds)
-                # compressed_norm_embeds = self.m_qformer['norm'](norm_embeds)
-                # print(attention_mask.shape)
+
                 if attention_mask is not None:
                     padding_mask = attention_mask.to(inputs_embeds.device)
                 else:
@@ -420,46 +730,126 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 token_length_list = [image_embeds.size(1), depth_embeds.size(1), flow_embeds.size(1), norm_embeds.size(1), inputs_embeds.size(1)]
                 x = torch.cat([image_embeds, depth_embeds, flow_embeds, norm_embeds,
                                inputs_embeds], dim=1)
-                # print(padding_mask.shape) 
                 mask = torch.cat((torch.zeros((padding_mask.size(0),
-                                               global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
-                # print(mask.shape, global_image_features_length)
-                prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
-                prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
-                
-                
-                # if getattr(self, "_use_flash_attention_2", False) or getattr(self.config, "_attn_implementation", "") == "flash_attention_2":
-                #     prefusion_attention_mask =(~mask).int()
-                # else: 
-                # prefusion_attention_mask =_prepare_4d_causal_attention_mask(~mask, (x.size(0), x.size(1)), x, 0)
-                # Expanding 4d mask
+                                                    global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
                 seq_len = mask.size(1)
-                prefusion_attention_mask =(~mask).int()
-                prefusion_attention_mask = prefusion_attention_mask.unsqueeze(1)
-                prefusion_attention_mask = prefusion_attention_mask.unsqueeze(3)
-                prefusion_attention_mask = prefusion_attention_mask.expand(-1, -1, -1, seq_len)
-
-                if prefusion_position_ids.dim() == 2:
-                    prefusion_position_ids = prefusion_position_ids[None, ...].expand(3, prefusion_position_ids.shape[0], -1)
-                prefusion_position_embeddings = self.model.rotary_emb(x, prefusion_position_ids)
-                if hasattr(self, 'prefusion'): 
-                    for layer in self.prefusion:
-                        lout = layer(x,
-                                  attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,
-                                  output_attentions=True)
+                
+                modality_rank = None
+                if self.more_config['modality_ranker'] == 'attention':
+                    if self.more_config['only_self_attention']:
+                        lout = self.prefusion(x)
                         x = lout[0]
                         prefusion_attn = lout[1]
-                        # print(prefusion_attn.shape)
+                        # print(x.shape, prefusion_attn.shape)
+                        
+                    elif self.more_config['learnable_attention'] and not self.more_config['only_self_attention']:
+                        
+                        prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
+                        prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
+                        seq_len = mask.size(1)
+                        prefusion_attention_mask =(~mask).int()
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(1)
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(3)
+                        prefusion_attention_mask = prefusion_attention_mask.expand(-1, -1, -1, seq_len)
+
+                        if prefusion_position_ids.dim() == 2:
+                            prefusion_position_ids = prefusion_position_ids[None, ...].expand(3, prefusion_position_ids.shape[0], -1)
+                        prefusion_position_embeddings = self.model.rotary_emb(x, prefusion_position_ids)
+                        # with torch.no_grad():
+                        if hasattr(self, 'prefusion'): 
+                            for layer in self.prefusion:
+                                if self.is_gradient_checkpointing and self.training:
+                                    lout = self.model._gradient_checkpointing_func(
+                                        layer.__call__,
+                                        x,
+                                        prefusion_attention_mask,
+                                        None, None, True, None, None, prefusion_position_embeddings
+                                    )
+                                else:
+                                    lout = layer(x,
+                                            attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,
+                                            output_attentions=True)
+                                x = lout[0]
+                                prefusion_attn = lout[1]
+                        
+                            
+                    elif not self.more_config['learnable_attention'] and not self.more_config['only_self_attention']:
+                        mask = torch.cat((torch.zeros((padding_mask.size(0),
+                                                global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
+                        prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
+                        prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
+                        seq_len = mask.size(1)
+                        prefusion_attention_mask =(~mask).int()
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(1)
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(3)
+                        prefusion_attention_mask = prefusion_attention_mask.expand(-1, -1, -1, seq_len)
+
+                        if prefusion_position_ids.dim() == 2:
+                            prefusion_position_ids = prefusion_position_ids[None, ...].expand(3, prefusion_position_ids.shape[0], -1)
+                        prefusion_position_embeddings = self.model.rotary_emb(x, prefusion_position_ids)
+                        with torch.no_grad():
+                            if hasattr(self, 'prefusion'): 
+                                for layer in self.prefusion:
+                                    if self.is_gradient_checkpointing and self.training:
+                                        lout = self.model._gradient_checkpointing_func(
+                                            layer.__call__,
+                                            x,
+                                            prefusion_attention_mask,
+                                            None, None, True, None, None, prefusion_position_embeddings
+                                        )
+                                    else:
+                                        lout = layer(x,
+                                                attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,
+                                                output_attentions=True)
+                                    x = lout[0]
+                                    prefusion_attn = lout[1]
+                        
+                    prefusion_attn = prefusion_attn.sum(dim=-2).mean(dim=1) # batch size, seq_len
+                    image_weight, depth_weight, flow_weight, norm_weight, text_weight = prefusion_attn.split(token_length_list, dim=1)
+                    image_weight, depth_weight, flow_weight, norm_weight = image_weight.sum(-1, keepdim=True), depth_weight.sum(-1, keepdim=True), flow_weight.sum(-1, keepdim=True), norm_weight.sum(-1, keepdim=True)
+                    modality_weight = torch.cat([image_weight, depth_weight, flow_weight, norm_weight], dim=1) # batch, n_modality
+                    if self.more_config['discrete_token_number']:
+                        modality_rank = get_rank_order(modality_weight)
+                    else:
+                        modality_rank = token_budgets_from_weight(modality_weight, self.total_multimodal_budgets)
+                    n_batch, n_modality = modality_rank.shape
+                elif self.more_config['modality_ranker'] == 'cosine_similarity':
+                    image_embeds, depth_embeds, flow_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
+                    modality_weight = self.prefusion([image_embeds, depth_embeds, flow_embeds, norm_embeds])
+                    if self.more_config['discrete_token_number']:
+                        modality_rank = get_rank_order(modality_weight)
+                    else:
+                        modality_rank = token_budgets_from_weight(modality_weight, self.total_multimodal_budgets)
+                    # modality_rank = get_rank_order(modality_weight)
+                    n_batch, n_modality = modality_rank.shape
+                elif self.more_config['modality_ranker'] == 'random':
+                    image_embeds, depth_embeds, flow_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
+                    # print(x.shape)
+                    modality_weight = self.prefusion([image_embeds, depth_embeds, flow_embeds, norm_embeds])
+                    # modality_rank = get_rank_order(modality_weight)
+                    
+                    if self.more_config['discrete_token_number']:
+                        modality_rank = get_rank_order(modality_weight)
+                    else:
+                        modality_rank = token_budgets_from_weight(modality_weight, self.total_multimodal_budgets)
                 image_embeds, depth_embeds, flow_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
-                prefusion_attn = prefusion_attn.sum(dim=-2).mean(dim=1) # batch size, seq_len
-                image_weight, depth_weight, flow_weight, norm_weight, text_weight = prefusion_attn.split(token_length_list, dim=1)
-                image_weight, depth_weight, flow_weight, norm_weight = image_weight.sum(-1, keepdim=True), depth_weight.sum(-1, keepdim=True), flow_weight.sum(-1, keepdim=True), norm_weight.sum(-1, keepdim=True)
-                modality_weight = torch.cat([image_weight, depth_weight, flow_weight, norm_weight], dim=1) # batch, n_modality
-                modality_rank = get_rank_order(modality_weight)
-                n_batch, n_modality = modality_rank.shape
+                # print(x.shape, prefusion_attn.shape)
+                # exit()
                 llm_input_image_embeds = []
+                random_rank = [1,2,3,0]
+                # print(modality_rank)
+                
+                # print(image_embeds.shape, depth_embeds.shape, flow_embeds.shape, norm_embeds.shape, modality_rank)
+                # print(x.shape, non_fused_inputs_embeds.shape)
+                # exit()
+                # print(modality_rank)
                 for bi in range(n_batch):
-                    image_rank, depth_rank, flow_rank, norm_rank = modality_rank[bi]
+                    if modality_rank is None:
+                        random.shuffle(random_rank)
+                        image_rank, depth_rank, flow_rank, norm_rank = random_rank
+                    else:
+                        image_rank, depth_rank, flow_rank, norm_rank = modality_rank[bi]
+            
                     compressed_image_embeds = self.m_qformer['image'](image_embeds[bi:bi+1], image_rank)
                     compressed_depth_embeds = self.m_qformer['depth'](depth_embeds[bi:bi+1], depth_rank)
                     compressed_flow_embeds = self.m_qformer['flow'](flow_embeds[bi:bi+1], flow_rank)
@@ -469,19 +859,14 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                     )
                 llm_input_image_embeds = torch.cat(llm_input_image_embeds, dim=0)
                 # fusion_text_features = x[:, -1 *input_ids.size(1):,:]
-
+                # print(llm_input_image_embeds.shape)
+                
                 # fusion_text_features=fusion_text_features*(~padding_mask).unsqueeze(-1).int()+inputs_embeds*padding_mask.unsqueeze(-1)
 
 
                 image_embeds = llm_input_image_embeds.reshape(-1, llm_input_image_embeds.shape[-1])
                 n_image_features = image_embeds.shape[0]
-                # print(n_image_features, n_image_tokens)
-                # print(non_fused_inputs_embeds.shape, fusion_text_features.shape)
                 inputs_embeds = non_fused_inputs_embeds
-                # if n_image_tokens != n_image_features:
-                #     raise ValueError(
-                #         f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
-                #     )
 
                 mask = input_ids == self.config.image_token_id
                 mask_unsqueezed = mask.unsqueeze(-1)
@@ -544,6 +929,8 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
+        # print(position_i ds.shape, attention_mask.shape, inputs_embeds.shape)
+        # exit()
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,
@@ -767,33 +1154,450 @@ class Qwen2_5_VLForConditionalGenerationMore(Qwen2_5_VLForConditionalGeneration)
             return position_ids, mrope_position_deltas
 
 
-def assign_qformer(model: Qwen2_5_VLForConditionalGenerationMore, modalities, multilevel_qformer = False, multilevel_mlp = False):
+
+class Qwen2_5_VLForConditionalGenerationMoreSA3D(Qwen2_5_VLForConditionalGenerationMore):
+    def __init__(self, config, more_config):
+        super().__init__(config, more_config)
+        pos_model = PositionalEncoding1D(1408 // 3)
+        x = torch.zeros(1, 256, 1408 // 3)
+        self.pc_pos_embedding = pos_model(x).squeeze().cuda()
+        self.pc_projector = nn.Sequential(
+            *[nn.LayerNorm(1408), 
+             Mlp(
+                    1408, config.hidden_size * 2, config.hidden_size
+                ),
+             nn.LayerNorm(config.hidden_size), 
+             ]
+        )
+    
+    @add_start_docstrings_to_model_forward(QWEN2_5_VL_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Qwen2_5_VLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        rope_deltas: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        second_per_grid_ts: Optional[torch.Tensor] = None,
+        n_image: Optional[torch.LongTensor] = None,
+        depth_values: Optional[torch.Tensor] = None,
+        norm_values: Optional[torch.Tensor] = None,
+        pc_values: Optional[torch.Tensor] = None,
+        pc_feature_values: Optional[torch.Tensor] = None,
+        norm_value_grid: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
+        r"""
+            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+        Returns:
+
+        Example:
+
+        ```python
+        >>> from PIL import Image
+        >>> import requests
+        >>> from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+        >>> model = Qwen2_5_VLForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+        >>> processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+
+        >>> messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "What is shown in this image?"},
+                ],
+            },
+        ]
+        >>> url = "https://www.ilankelman.org/stopsigns/australia.jpg"
+        >>> image = Image.open(requests.get(url, stream=True).raw)
+
+        >>> text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        >>> inputs = processor(text=[text], images=[image], vision_infos=[vision_infos])
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "The image shows a street scene with a red stop sign in the foreground. In the background, there is a large red gate with Chinese characters ..."
+        ```"""
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if inputs_embeds is None:
+            inputs_embeds = self.model.embed_tokens(input_ids)
+            if pixel_values is not None:
+                pixel_values = pixel_values.type(self.visual.dtype)
+
+                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                depth_embeds = self.visual(depth_values, grid_thw=image_grid_thw)
+                norm_embeds = self.visual(norm_values, grid_thw=norm_value_grid)
+                
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    pc_embeds = pc_feature_values
+                    pc = pc_values.long()
+                    all_pcs = torch.zeros((pc_embeds.shape))
+                    for j in range(pc.shape[0]):
+                        pcs = []
+                        for i in range(3):
+                            pc_i = pc[j][:, i]
+                            pcs.append(self.pc_pos_embedding[pc_i])
+                        pcs = torch.cat(pcs, -1)
+                        all_pcs[j][:, :1407] = pcs
+                    all_pcs = all_pcs.cuda()
+                pc_embeds = pc_embeds + 0.01 * all_pcs
+                # print(f"PC embedding:", pc_embeds.shape)
+                pc_embeds = pc_embeds.to(dtype=image_embeds.dtype)
+                pc_embeds = self.pc_projector(pc_embeds)
+                
+                
+                n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
+                # print("n_image_tokens", n_image_tokens)
+                
+                n_batch = input_ids.shape[0]
+                
+                image_embeds = image_embeds.reshape(n_batch, -1, image_embeds.shape[-1])
+                depth_embeds = depth_embeds.reshape(n_batch, -1, depth_embeds.shape[-1])
+                pc_embeds = pc_embeds.reshape(n_batch, -1, depth_embeds.shape[-1])
+                norm_embeds = norm_embeds.reshape(n_batch, -1, norm_embeds.shape[-1])
+
+                if attention_mask is not None:
+                    padding_mask = attention_mask.to(inputs_embeds.device)
+                else:
+                    padding_mask = torch.ones(n_batch, 0).to(inputs_embeds.device).bool()
+                    # attention_mask = (input_ids > -1000000).to(torch.long).to(inputs_embeds.device).bool()
+                non_fused_inputs_embeds = inputs_embeds
+                global_image_features_length = image_embeds.size(1) + depth_embeds.size(1) + pc_embeds.size(1) + norm_embeds.size(1)
+                # compressed_global_image_features_length = compressed_image_embeds.size(1) + compressed_depth_embeds.size(1) + compressed_flow_embeds.size(1) + compressed_norm_embeds.size(1)
+                token_length_list = [image_embeds.size(1), depth_embeds.size(1), pc_embeds.size(1), norm_embeds.size(1), inputs_embeds.size(1)]
+                x = torch.cat([image_embeds, depth_embeds, pc_embeds, norm_embeds,
+                               inputs_embeds], dim=1)
+                mask = torch.cat((torch.zeros((padding_mask.size(0),
+                                                    global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
+                seq_len = mask.size(1)
+                
+                modality_rank = None
+                if self.more_config['modality_ranker'] == 'attention':
+                    if self.more_config['only_self_attention']:
+                        lout = self.prefusion(x)
+                        x = lout[0]
+                        prefusion_attn = lout[1]
+                        # print(x.shape, prefusion_attn.shape)
+                        
+                    elif self.more_config['learnable_attention'] and not self.more_config['only_self_attention']:
+                        
+                        prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
+                        prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
+                        seq_len = mask.size(1)
+                        prefusion_attention_mask =(~mask).int()
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(1)
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(3)
+                        prefusion_attention_mask = prefusion_attention_mask.expand(-1, -1, -1, seq_len)
+
+                        if prefusion_position_ids.dim() == 2:
+                            prefusion_position_ids = prefusion_position_ids[None, ...].expand(3, prefusion_position_ids.shape[0], -1)
+                        prefusion_position_embeddings = self.model.rotary_emb(x, prefusion_position_ids)
+                        # with torch.no_grad():
+                        if hasattr(self, 'prefusion'): 
+                            for layer in self.prefusion:
+                                if self.is_gradient_checkpointing and self.training:
+                                    lout = self.model._gradient_checkpointing_func(
+                                        layer.__call__,
+                                        x,
+                                        prefusion_attention_mask,
+                                        None, None, True, None, None, prefusion_position_embeddings
+                                    )
+                                else:
+                                    lout = layer(x,
+                                            attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,
+                                            output_attentions=True)
+                                x = lout[0]
+                                prefusion_attn = lout[1]
+                        
+                            
+                    elif not self.more_config['learnable_attention'] and not self.more_config['only_self_attention']:
+                        mask = torch.cat((torch.zeros((padding_mask.size(0),
+                                                global_image_features_length),device=padding_mask.device).bool(), padding_mask),dim=1)
+                        prefusion_position_ids = (~mask).int().long().cumsum(-1) - 1
+                        prefusion_position_ids.masked_fill_((~mask).int() == 0, 1)
+                        seq_len = mask.size(1)
+                        prefusion_attention_mask =(~mask).int()
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(1)
+                        prefusion_attention_mask = prefusion_attention_mask.unsqueeze(3)
+                        prefusion_attention_mask = prefusion_attention_mask.expand(-1, -1, -1, seq_len)
+
+                        if prefusion_position_ids.dim() == 2:
+                            prefusion_position_ids = prefusion_position_ids[None, ...].expand(3, prefusion_position_ids.shape[0], -1)
+                        prefusion_position_embeddings = self.model.rotary_emb(x, prefusion_position_ids)
+                        with torch.no_grad():
+                            if hasattr(self, 'prefusion'): 
+                                for layer in self.prefusion:
+                                    if self.is_gradient_checkpointing and self.training:
+                                        lout = self.model._gradient_checkpointing_func(
+                                            layer.__call__,
+                                            x,
+                                            prefusion_attention_mask,
+                                            None, None, True, None, None, prefusion_position_embeddings
+                                        )
+                                    else:
+                                        lout = layer(x,
+                                                attention_mask=prefusion_attention_mask, position_embeddings=prefusion_position_embeddings,
+                                                output_attentions=True)
+                                    x = lout[0]
+                                    prefusion_attn = lout[1]
+                        
+                    prefusion_attn = prefusion_attn.sum(dim=-2).mean(dim=1) # batch size, seq_len
+                    image_weight, depth_weight, pc_weight, norm_weight, text_weight = prefusion_attn.split(token_length_list, dim=1)
+                    image_weight, depth_weight, pc_weight, norm_weight = image_weight.sum(-1, keepdim=True), depth_weight.sum(-1, keepdim=True), pc_weight.sum(-1, keepdim=True), norm_weight.sum(-1, keepdim=True)
+                    modality_weight = torch.cat([image_weight, depth_weight, pc_weight, norm_weight], dim=1) # batch, n_modality
+                    if self.more_config['discrete_token_number']:
+                        modality_rank = get_rank_order(modality_weight)
+                    else:
+                        modality_rank = token_budgets_from_weight(modality_weight, self.total_multimodal_budgets)
+                    n_batch, n_modality = modality_rank.shape
+                elif self.more_config['modality_ranker'] == 'cosine_similarity':
+                    image_embeds, depth_embeds, pc_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
+                    modality_weight = self.prefusion([image_embeds, depth_embeds, pc_embeds, norm_embeds])
+                    if self.more_config['discrete_token_number']:
+                        modality_rank = get_rank_order(modality_weight)
+                    else:
+                        modality_rank = token_budgets_from_weight(modality_weight, self.total_multimodal_budgets)
+                    # modality_rank = get_rank_order(modality_weight)
+                    n_batch, n_modality = modality_rank.shape
+                elif self.more_config['modality_ranker'] == 'random':
+                    image_embeds, depth_embeds, pc_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
+                    # print(x.shape)
+                    modality_weight = self.prefusion([image_embeds, depth_embeds, pc_embeds, norm_embeds])
+                    # modality_rank = get_rank_order(modality_weight)
+                    
+                    if self.more_config['discrete_token_number']:
+                        modality_rank = get_rank_order(modality_weight)
+                    else:
+                        modality_rank = token_budgets_from_weight(modality_weight, self.total_multimodal_budgets)
+                image_embeds, depth_embeds, pc_embeds, norm_embeds, _ = x.split(token_length_list, dim=1)
+                # print(torch.all(x.isnan()))
+                # print(x.shape, prefusion_attn.shape)
+                # exit()
+                llm_input_image_embeds = []
+                random_rank = [1,2,3,0]
+                # print(modality_rank)
+                
+                # print(image_embeds.shape, depth_embeds.shape, flow_embeds.shape, norm_embeds.shape, modality_rank)
+                # print(x.shape, non_fused_inputs_embeds.shape)
+                # exit()
+                # print(modality_rank)
+                for bi in range(n_batch):
+                    if modality_rank is None:
+                        random.shuffle(random_rank)
+                        image_rank, depth_rank, pc_rank, norm_rank = random_rank
+                    else:
+                        image_rank, depth_rank, pc_rank, norm_rank = modality_rank[bi]
+            
+                    compressed_image_embeds = self.m_qformer['image'](image_embeds[bi:bi+1], image_rank)
+                    compressed_depth_embeds = self.m_qformer['depth'](depth_embeds[bi:bi+1], depth_rank)
+                    compressed_pc_embeds = self.m_qformer['pc'](pc_embeds[bi:bi+1], pc_rank)
+                    compressed_norm_embeds = self.m_qformer['norm'](norm_embeds[bi:bi+1], norm_rank)
+                    llm_input_image_embeds.append(
+                        torch.cat([compressed_image_embeds, compressed_depth_embeds, compressed_pc_embeds, compressed_norm_embeds], dim=1)
+                    )
+                llm_input_image_embeds = torch.cat(llm_input_image_embeds, dim=0)
+                # fusion_text_features = x[:, -1 *input_ids.size(1):,:]
+                # print(llm_input_image_embeds.shape)
+                
+                # fusion_text_features=fusion_text_features*(~padding_mask).unsqueeze(-1).int()+inputs_embeds*padding_mask.unsqueeze(-1)
+
+
+                image_embeds = llm_input_image_embeds.reshape(-1, llm_input_image_embeds.shape[-1])
+                n_image_features = image_embeds.shape[0]
+                inputs_embeds = non_fused_inputs_embeds
+
+                mask = input_ids == self.config.image_token_id
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                image_mask = mask_expanded.to(inputs_embeds.device)
+                # print(image_mask.shape)
+                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                # print(image_mask.shape, image_embeds.shape, input_ids.shape, inputs_embeds.shape, mask.sum())
+                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            if pixel_values_videos is not None:
+                pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
+                video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+                n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
+                n_video_features = video_embeds.shape[0]
+                if n_video_tokens != n_video_features:
+                    raise ValueError(
+                        f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+                    )
+
+                mask = input_ids == self.config.video_token_id
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                video_mask = mask_expanded.to(inputs_embeds.device)
+
+                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(inputs_embeds.device)
+        # print(attention_mask.shape, input_ids.shape)
+        # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
+        if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
+            # calculate RoPE index once per generation in the pre-fill stage only
+            if (
+                (cache_position is not None and cache_position[0] == 0)
+                or self.rope_deltas is None
+                or (past_key_values is None or past_key_values.get_seq_length() == 0)
+            ):
+                position_ids, rope_deltas = self.get_rope_index(
+                    input_ids,
+                    image_grid_thw,
+                    video_grid_thw,
+                    second_per_grid_ts,
+                    attention_mask,
+                )
+                self.rope_deltas = rope_deltas
+            # then use the prev pre-calculated rope-deltas to get the correct position ids
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = (
+                    (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                    if cache_position is not None
+                    else 0
+                )
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        # print(position_i ds.shape, attention_mask.shape, inputs_embeds.shape)
+        # exit()
+        outputs = self.model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs[0]
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return Qwen2_5_VLCausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=self.rope_deltas,
+        )
+
+def assign_qformer(model: Qwen2_5_VLForConditionalGenerationMore, more_config):
     model_dict = nn.ModuleDict()
-    for mm in modalities:
-        if multilevel_qformer:
+    for mm in more_config['modality_list']:
+        if more_config['token_pruning_method'] == 'qformer':
             model_dict[mm] = MultiLevelQFormerEncoder(
-                model.config.hidden_size, modalities[mm], len(modalities), model.config.hidden_size
+                model.config.hidden_size, more_config[mm], len(more_config['modality_list']), model.config.hidden_size,
+                more_config=more_config
             )
-        elif multilevel_mlp:
+        elif more_config['token_pruning_method'] == 'linear_pooling':
             # print("Use Multi-Level MLP", '!'*40)
-            model_dict[mm] = MultiLevelCompression(
-                model.config.hidden_size, modalities[mm], len(modalities), model.config.hidden_size
-            )
+            if more_config['parameterized_pooling']:
+                n_original_token = more_config['n_original_tokens'] if more_config['n_original_tokens'] is not None else 10 * 256
+                if mm == 'pc':
+                    n_original_token = 5000
+                model_dict[mm] = MultiLevelCompression(
+                    model.config.hidden_size, more_config[mm], len(more_config['modality_list']), model.config.hidden_size,
+                    more_config=more_config, origin_tokens = n_original_token,
+                )
+            else:
+                model_dict[mm] = LinearPoolingParameterFree(
+                    model.config.hidden_size, more_config[mm], len(more_config['modality_list']), model.config.hidden_size,
+                    more_config=more_config
+                )
+        elif more_config['token_pruning_method'] == 'cosine_similarity':
+            model_dict[mm] = CosineSimilarityPruning(
+                    model.config.hidden_size, more_config[mm], len(more_config['modality_list']), model.config.hidden_size,
+                    more_config=more_config
+                )
         else:
             model_dict[mm] = QFormerEncoder(
-                model.config.hidden_size, modalities[mm], model.config.hidden_size
+                model.config.hidden_size, more_config[mm], model.config.hidden_size
             )
     model.register_module("m_qformer", model_dict)
     
     
-def assign_prefusion(model: Qwen2_5_VLForConditionalGenerationMore, n_prefusion_layers=3):
+def assign_prefusion(model: Qwen2_5_VLForConditionalGenerationMore, more_config):
     attn_type = model.config._attn_implementation
+    n_prefusion_layers = more_config['n_prefusion_layers']
     model.config._attn_implementation = 'eager'
-    
-    prefusion_layers=nn.ModuleList([Qwen2_5_VLDecoderLayer(model.config,layer_idx=i) for i in range(n_prefusion_layers)])
-    model.config._attn_implementation = attn_type
+    if more_config['modality_ranker'] == 'attention':
+        if not more_config['only_self_attention']:
+            prefusion_layers=nn.ModuleList([Qwen2_5_VLDecoderLayer(model.config,layer_idx=i) for i in range(n_prefusion_layers)])
+            # model.config._attn_implementation = attn_type
+            # model.register_module("prefusion", prefusion_layers)
+            # intialize from model
+            # if not more_config['learnable_attention']:
+            with torch.no_grad():
+                for i in range(n_prefusion_layers):
+                    prefusion_layers[i].load_state_dict(model.model.layers[i].state_dict())
+        else:
+            prefusion_layers=Attention(model.config.hidden_size)
+            # model.register_module("prefusion", prefusion_layers)
+    elif more_config['modality_ranker'] == 'random':
+        prefusion_layers=RandomOrder()
+        # model.register_module("prefusion", prefusion_layers)
+    elif more_config['modality_ranker'] == 'cosine_similarity':
+        prefusion_layers=CosineSimilarityRedundancy()
+        # model.register_module("prefusion", prefusion_layers)
+    # print(prefusion_layers)
     model.register_module("prefusion", prefusion_layers)
-    
+    model.config._attn_implementation = attn_type
     
 class Qwen2_5_VLForConditionalGenerationMoreGRPO(Qwen2_5_VLForConditionalGenerationMore):
     def __init__(self, config, eval_model=False,

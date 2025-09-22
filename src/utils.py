@@ -21,7 +21,7 @@ def disable_torch_init():
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, 
                           device_map="auto", device="cuda", use_flash_attn=False, grpo_pretrain = None, **gkwargs):
     kwargs = {"device_map": device_map}
-    
+    model_args = gkwargs['model_args']
     if device != "cuda":
         kwargs['device_map'] = {"":device}
     
@@ -53,11 +53,27 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         processor = Qwen2_5_VLProcessorOneToken.from_pretrained(model_base, n_frames = gkwargs['n_image']+gkwargs['n_depth']+gkwargs['n_norm']+gkwargs['n_flow'])
         print('Loading Qwen2-VL from base model...')
         if "Qwen2.5" in model_base:
-            print(model_base)
-            model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-            assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
-                           multilevel_qformer=gkwargs['multilevel_qformer'], multilevel_mlp=gkwargs['multilevel_mlp'])
-            assign_prefusion(model, gkwargs['n_prefusion_layers'])
+            more_config = {
+                'image': model_args.n_image,
+                'depth': model_args.n_depth,
+                'norm': model_args.n_norm,
+                'flow': model_args.n_flow,
+                'modality_ranker': model_args.modality_ranker,
+                'discrete_token_number': model_args.discrete_token_number,
+                'token_distribution': model_args.token_distribution,
+                'learnable_attention': model_args.learnable_attention,
+                'n_prefusion_layers': model_args.n_prefusion_layers,
+                'only_self_attention': model_args.only_self_attention,
+                'token_pruning_method': model_args.token_pruning_method,
+                'cosine_sim_drop': model_args.cosine_sim_drop,
+                'parameterized_pooling': model_args.parameterized_pooling,
+                'modality_list': ['image', 'depth', 'norm', 'flow'],
+                "n_original_tokens": model_args.n_original_tokens,
+            }
+            model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, more_config = more_config, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+            # assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
+            #                multilevel_qformer=gkwargs['multilevel_qformer'], multilevel_mlp=gkwargs['multilevel_mlp'])
+            # assign_prefusion(model, gkwargs['n_prefusion_layers'])
         else:
             model = Qwen2VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
         token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
@@ -81,8 +97,11 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         model = model.merge_and_unload()
 
         print('Model Loaded!!!')
-    elif grpo_pretrain is not None:
         
+        
+        
+    elif grpo_pretrain is not None:
+        print(gkwargs)
         lora_cfg_pretrained = AutoConfig.from_pretrained(model_path)
         if hasattr(lora_cfg_pretrained, 'quantization_config'):
             del lora_cfg_pretrained.quantization_config
@@ -91,10 +110,26 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         print('Loading Qwen2-VL from base model...')
         if "Qwen2.5" in model_base:
             print(model_base)
-            model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-            assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
-                           multilevel_qformer=gkwargs['multilevel_qformer'], multilevel_mlp=gkwargs['multilevel_qformer'])
-            assign_prefusion(model, gkwargs['n_prefusion_layers'])
+            more_config = {
+                'image': model_args.n_image,
+                'depth': model_args.n_depth,
+                'norm': model_args.n_norm,
+                'flow': model_args.n_flow,
+                'modality_ranker': model_args.modality_ranker,
+                'discrete_token_number': model_args.discrete_token_number,
+                'token_distribution': model_args.token_distribution,
+                'learnable_attention': model_args.learnable_attention,
+                'n_prefusion_layers': model_args.n_prefusion_layers,
+                'only_self_attention': model_args.only_self_attention,
+                'token_pruning_method': model_args.token_pruning_method,
+                'cosine_sim_drop': model_args.cosine_sim_drop,
+                'parameterized_pooling': model_args.parameterized_pooling,
+                'modality_list': ['image', 'depth', 'norm', 'flow']
+            }
+            model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_base, low_cpu_mem_usage=True, more_config=more_config, config=lora_cfg_pretrained, **kwargs)
+            # assign_qformer(model, {"image": gkwargs['n_image'], 'depth': gkwargs['n_depth'], 'norm': gkwargs['n_norm'], 'flow': gkwargs['n_flow']},
+            #                multilevel_qformer=gkwargs['multilevel_qformer'], multilevel_mlp=gkwargs['multilevel_mlp'])
+            # assign_prefusion(model, gkwargs['n_prefusion_layers'])
             model.from_pretrained(grpo_pretrain)
         else:
             model = Qwen2VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
@@ -108,6 +143,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
 
             print('Merging LoRA weights...')
             model = model.merge_and_unload()
+            
+            # assign_prefusion(model, gkwargs['n_prefusion_layers'])
 
         print('Model Loaded!!!')
     else:
@@ -125,6 +162,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             kwargs['n_flow'] = gkwargs['n_flow']
             kwargs['multilevel_qformer'] = gkwargs['multilevel_qformer']
             kwargs['n_prefusion_layers'] = gkwargs['n_prefusion_layers']
+            kwargs['multilevel_mlp'] = gkwargs['multilevel_mlp']
             model = Qwen2_5_VLForConditionalGenerationMore.from_pretrained(model_path, low_cpu_mem_usage=True, eval_model = True,
                                                                            **kwargs)
             model_dict = {pn:p for pn, p in model.named_parameters()}

@@ -9,15 +9,29 @@ from trl import GRPOConfig as GRPOConfigTRL
 @dataclass
 class ModelArguments:
     model_id: Optional[str] = field(default="Qwen/Qwen2-VL-7B-Instruct")
-    model_path: Optional[str] = field(default="output/lora_vision_test")
+    model_path: Optional[str] = field(default=None)
     sft_model_path: Optional[str] = field(default=None)
     n_image: int = field(default=64)
     n_depth: int = field(default=64)
     n_norm: int = field(default=64)
     n_flow: int = field(default=64)
-    n_prefusion_layers: int = field(default=3)
-    multilevel_qformer: bool = field(default=False)
-    multilevel_mlp: bool = field(default=False)
+    n_pc: int = field(default=64)
+    cosine_sim_drop: bool = field(default=True)
+    n_original_tokens: int|None = field(default=None)
+    
+    modality_ranker: str = field(default="attention") # attention, cosine_similarity, random
+    learnable_attention: bool = field(default=False) # only self attention false works
+    n_prefusion_layers: int = field(default=3) # 1 2 3
+    only_self_attention: bool = field(default=True) # True: decoder layer, False: one self-attention module
+    
+    token_pruning_method: str = field(default='linear_pooling') # qformer, cosine_similarity, linear_pooling
+    discrete_token_number: bool = field(default=False)
+    token_distribution: str = field(default="decrease") # top-1, top-2, top-3, decrease\
+    parameterized_pooling: bool=field(default=False) # True: MLP, False: average
+
+    multilevel_qformer: bool = False
+    multilevel_mlp: bool = True
+    
 
 @dataclass
 class TrainingArguments(HFTrainingArguments):

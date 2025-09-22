@@ -17,7 +17,7 @@ from src.model.qwenvl_more_modality import Qwen2_5_VLForConditionalGenerationMor
 from src.trainer import QwenSFTTrainer
 from src.trainer.grpo_trainer import extract_vision_info
 from qwen_vl_utils import fetch_image
-from src.dataset import make_supervised_data_module, make_supervised_eval_data_module, make_supervised_eval_data_module2
+from src.dataset import make_supervised_data_module, make_supervised_eval_data_module, make_supervised_eval_sqa3d_data_module
 from src.params import DataArguments, ModelArguments, TrainingArguments
 from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
 from src.dataset.data_utils import replace_image_tokens
@@ -98,13 +98,14 @@ def process_vision_info_more(
     image_inputs = []
     depth_inputs = []
     norm_inputs = []
-    flow_inputs = []
     text_inputs = []
+    pc_inputs = []
+    pc_feature_inputs = []
     
     image_info = []
     depth_info = []
     norm_info = []
-    flow_info = []
+    pc_info = []
     
     for vision_info in vision_infos:
         if 'type' in vision_info:
@@ -114,10 +115,13 @@ def process_vision_info_more(
                 depth_info.append(vision_info)
             elif 'norm' == vision_info['type']:
                 norm_info.append(vision_info)
-            elif 'flow' == vision_info['type']:
-                flow_info.append(vision_info)
             elif 'text' == vision_info['type']:
                 text_inputs.append(vision_info['text'])
+            elif 'pc' == vision_info['type']:
+                pc_info.append(
+                    {'pc': vision_info['pc'],
+                    'pc_feature': vision_info['pc_feature']}
+                )
             else:
                 raise ValueError("image, image_url or video should in content.")
     
@@ -136,12 +140,13 @@ def process_vision_info_more(
         image_inputs.append(fetch_image(image_info[sid]))
         depth_inputs.append(fetch_image(depth_info[sid]))
         norm_inputs.append(fetch_image(norm_info[sid]))
-        flow_inputs.append(fetch_image(flow_info[sid]))
+    pc_inputs.append(pc_info[0]['pc'])
+    pc_feature_inputs.append(pc_info[0]['pc_feature'])
     if len(image_inputs) == 0:
         image_inputs = None
 
     # print(len(image_inputs), len(depth_inputs), len(norm_inputs), len(flow_inputs))
-    return image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs
+    return image_inputs, depth_inputs, norm_inputs, pc_inputs, pc_feature_inputs, text_inputs
 
 def eval():
     parser = HfArgumentParser(
@@ -161,7 +166,7 @@ def eval():
                                                 lora_enable = lora_enable
                         )
 
-    data_module = make_supervised_eval_data_module2(model_id=model_args.model_id,
+    data_module = make_supervised_eval_sqa3d_data_module(model_id=model_args.model_id,
                                               processor=processor,
                                               data_args=data_args)
 
@@ -186,10 +191,8 @@ def eval():
     device = training_args.device
     model = model.to(device, dtype=torch.bfloat16)
     
-    group_acc = {'CW': 0, 'CH': 0, 'TN': 0, 'TC': 0, 'DC': 0, 'DL': 0, 'DO': 0, 'TP': 0}
-    group_cnt = {'CW': 0, 'CH': 0, 'TN': 0, 'TC': 0, 'DC': 0, 'DL': 0, 'DO': 0, 'TP': 0}
-    overall_acc = {'C':0, 'T':0, 'D':0}
-    overall_cnt = {'C':0, 'T':0, 'D':0}
+    group_acc = {'What': 0, 'Is': 0, 'How': 0, 'Can': 0, 'Which': 0, 'Other': 0}
+    group_cnt = {'What': 0, 'Is': 0, 'How': 0, 'Can': 0, 'Which': 0, 'Other': 0}
     all_acc = 0
     all_cnt = 0
     for batch in tqdm(dataloader):
@@ -205,7 +208,7 @@ def eval():
         inner_pred = []
         for j in range(n_times):
         
-            image_inputs, depth_inputs, norm_inputs, flow_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False, is_random=False)
+            image_inputs, depth_inputs, norm_inputs, pc_inputs, pc_feature_inputs, text_inputs = process_vision_info_more(prompts, return_video_kwargs=False, is_random=False)
             video_inputs = None
             prompts_text = [
                 system_message + f"{DEFAULT_IM_START_TOKEN}{'user'}\n{replace_image_tokens(item)}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}assistant\n"
@@ -233,16 +236,6 @@ def eval():
             
             tmp_prompt_inputs = processor(
                 text = copy.deepcopy(tmp_prompt_text),
-                images=flow_inputs,
-                videos=video_inputs,
-                padding=False,
-                do_resize=False,
-                return_tensors="pt"
-            )
-            prompt_inputs['flow_values'] = tmp_prompt_inputs['pixel_values']
-            
-            tmp_prompt_inputs = processor(
-                text = copy.deepcopy(tmp_prompt_text),
                 images=norm_inputs,
                 videos=video_inputs,
                 padding=False,
@@ -251,6 +244,8 @@ def eval():
             )
             prompt_inputs['norm_values'] = tmp_prompt_inputs['pixel_values']
             prompt_inputs['norm_value_grid'] = tmp_prompt_inputs['image_grid_thw']
+            prompt_inputs['pc_values'] = torch.stack(pc_inputs).to(torch.bfloat16).to(device)
+            prompt_inputs['pc_feature_values'] = torch.stack(pc_feature_inputs).to(torch.bfloat16).to(device)
             
             prompt_inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in prompt_inputs.items()}
 
@@ -259,15 +254,16 @@ def eval():
             pred = tokenizer.decode(out[0], skip_special_tokens=False)
             # print(pred)
             pred = pred.split('assistant')[-1][1:]
+            pred = pred.split(' ')
             print(pred)
             # label_index = batch['labels'][0]
             # label_index = label_index[label_index!= -100]
             label = labels.strip()
-            print(label)
+            # print(label)
             
             qtype = qid.split('_')[0]
             
-            a_label = label[0]
+            a_label = label
             a_pred = pred[0]
             inner_pred.append(a_pred)
         # print(a_label, inner_pred)
@@ -275,58 +271,20 @@ def eval():
         a_pred = inner_pred[0]
         if a_label == a_pred:
             group_acc[qtype] += 1
-            overall_acc[qtype[0]] += 1
             all_acc += 1
         group_cnt[qtype] += 1
-        overall_cnt[qtype[0]] += 1
 
         print('Acc: {:.2f}'.format(all_acc*100.0/(all_cnt+0.00001)))
 
-        # print(label, pred)
-        # print(a_label, a_pred)
-        # print(len(a_label), len(a_pred))
-        # break
+
     results = {}
     print('Acc: {:.2f}'.format(all_acc*100.0/(all_cnt+0.00001)))
     results['ave'] = all_acc*100.0/all_cnt
     for qtype in group_acc:
         results[qtype] = group_acc[qtype]*100.0/(group_cnt[qtype]+0.00001)
-    for sqtype in overall_acc:
-        results[sqtype] = overall_acc[sqtype]*100.0/(overall_cnt[sqtype]+0.00001)
     print(results)
     with open(os.path.join(model_args.model_path, 'eval_results.json'), 'w') as f:
         json.dump(results, f, indent=4)
-    # trainer = QwenSFTTrainer(
-    #     model=model,
-    #     processing_class=processor,
-    #     args=training_args,
-    #     **data_module
-    # )
-    
-    # if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-    #     trainer.train(resume_from_checkpoint=True)
-    # else:
-    #     trainer.train()
-
-    # trainer.save_state()
-
-    # model.config.use_cache = True
-    
-    # if training_args.lora_enable:
-    #     state_dict = get_peft_state_maybe_zero_3(
-    #         model.named_parameters(), training_args.lora_bias
-    #     )
-
-    #     non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-    #         model.named_parameters(), require_grad_only=True
-    #     )
-
-    #     if local_rank == 0 or local_rank == -1:
-    #         model.config.save_pretrained(training_args.output_dir)
-    #         model.save_pretrained(training_args.output_dir, state_dict=state_dict)
-    #         torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))
-    # else:
-    #     safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
 
 
 

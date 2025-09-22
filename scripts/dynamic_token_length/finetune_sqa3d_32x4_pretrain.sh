@@ -15,14 +15,14 @@ MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 # MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 export HOME=/playpen/pengjie_xinyu
 export PYTHONPATH=src:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 # export CUDA_VISIBLE_DEVICES=5
-export NCCL_P2P_DISABLE=1
-export NCCL_IB_DISABLE=1
+export NCCL_P2P_DISABLE=0
+export NCCL_IB_DISABLE=0
 # export HF_ENDPOINT=https://hf-mirror.com
 
 GLOBAL_BATCH_SIZE=16
-BATCH_PER_DEVICE=8
+BATCH_PER_DEVICE=1
 NUM_DEVICES=4
 GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
 PROJ_ROOT=$(pwd)
@@ -31,16 +31,15 @@ n_image=32 # 56 64/
 n_depth=32 # 40
 n_norm=32 # 24
 n_flow=32 # 8
-multilevel_qformer=False
-multilevel_mlp=True
+multilevel_qformer=True
+multilevel_mlp=False
 image_resolution=448
+out_dir=sqa3d_${n_image}_${n_depth}_${n_norm}_${n_flow}_test
 # output/lora_vision_test_32_32_32_32_token_dynamic_full_crema_policy_10/checkpoint-2000
 # If you want to tune the `embed_token` with LoRA, You need to tune `lm_head` together
 # You should freeze the the merger also, becuase the merger is included in the vision_tower.
-out_dir=train_output/r0_mr-attention_la-True_osa-False_npre-3_tp-qformer_td-decrease
-
-
-python src/train/eval_sft.py \
+# export CUDA_LAUNCH_BLOCKING=1
+deepspeed --master_port 25901 src/train/train_sqa3d_sft.py \
     --use_liger True \
     --lora_enable True \
     --vision_lora False \
@@ -50,10 +49,10 @@ python src/train/eval_sft.py \
     --lora_alpha 64 \
     --lora_dropout 0.05 \
     --num_lora_modules -1 \
+    --deepspeed scripts/zero2.json \
     --model_id $MODEL_NAME \
-    --data_path local_labels/grpo_val_subset.json \
-    --model_path $out_dir \
-    --image_folder . \
+    --data_path nextqa/sqa3d_labels/sqa3d_training_subset.json \
+    --image_folder nextqa/sqa3d \
     --remove_unused_columns False \
     --freeze_vision_tower True \
     --freeze_llm True \
@@ -61,7 +60,7 @@ python src/train/eval_sft.py \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
-    --output_dir output_local/lora_vision_test \
+    --output_dir train_output/$out_dir \
     --num_train_epochs 1 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
@@ -69,22 +68,31 @@ python src/train/eval_sft.py \
     --image_max_pixels $((256 * 28 * 28)) \
     --image_resized_width $image_resolution \
     --image_resized_height $image_resolution \
-    --learning_rate 2e-4 \
+    --learning_rate 1e-5 \
     --weight_decay 0.1 \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 1 \
+    --logging_steps 5 \
     --tf32 True \
     --gradient_checkpointing True \
     --report_to tensorboard \
     --lazy_preprocess True \
     --save_strategy "steps" \
-    --save_steps 200 \
-    --save_total_limit 10 \
-    --dataloader_num_workers 4 \
+    --save_steps 2000 \
+    --save_total_limit 1 \
+    --dataloader_num_workers 8 \
     --n_image $n_image \
     --n_depth $n_depth \
     --n_norm $n_norm \
     --n_flow $n_flow \
-    --multilevel_qformer $multilevel_qformer \
-    --multilevel_mlp $multilevel_mlp \
+    --frame_length 5 \
+    --n_original_tokens 1280 \
+    --modality_ranker "attention" \
+    --learnable_attention True \
+    --n_prefusion_layers 3 \
+    --only_self_attention False \
+    --token_pruning_method "qformer" \
+    --discrete_token_number True \
+    --token_distribution "decrease" \
+    --parameterized_pooling True \
+

@@ -179,3 +179,5 @@ nextqa*
 local_labels/*
 irregular/*
 output_local
+train_output/*
+train_with_best_config_output/*
