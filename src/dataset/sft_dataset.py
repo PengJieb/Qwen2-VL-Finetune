@@ -1135,6 +1135,8 @@ class SFTDatasetSQA3DEval(Dataset):
         self.video_resized_w = data_args.video_resized_width
         self.video_resized_h = data_args.video_resized_height
         self.fps = data_args.fps
+        self.image_folder = self.data_args.image_folder
+        self.frame_length = self.data_args.frame_length
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -1172,7 +1174,7 @@ class SFTDatasetSQA3DEval(Dataset):
         is_video = False
 
         contents = []
-        selected_image, selected_depth, selected_flow, selected_norm = self.check_and_sample(i)
+        selected_image, selected_depth, selected_norm, selected_pc, selected_pc_feature = self.check_and_sample(i)
 
         if "image" in sources:
 

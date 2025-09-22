@@ -288,6 +288,7 @@ def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[di
                         or 'norm' in ele
                         or 'flow' in ele
                         or 'text' in ele
+                        or 'pc' in ele
                     ):
                         vision_infos.append(ele)
     return vision_infos

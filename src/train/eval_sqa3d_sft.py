@@ -19,7 +19,7 @@ from src.trainer.grpo_trainer import extract_vision_info
 from qwen_vl_utils import fetch_image
 from src.dataset import make_supervised_data_module, make_supervised_eval_data_module, make_supervised_eval_sqa3d_data_module
 from src.params import DataArguments, ModelArguments, TrainingArguments
-from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
+from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init, load_pretrained_sqa3d_model
 from src.dataset.data_utils import replace_image_tokens
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 import pathlib
@@ -89,7 +89,7 @@ def configure_llm(model, training_args):
 def process_vision_info_more(
     conversations: list[dict] | list[list[dict]],
     return_video_kwargs: bool = False,
-    n_frame = 10, is_random = True
+    n_frame = 5, is_random = True
 ):
 
     vision_infos = extract_vision_info(conversations)
@@ -109,6 +109,7 @@ def process_vision_info_more(
     
     for vision_info in vision_infos:
         if 'type' in vision_info:
+            # print(vision_info['type'])
             if 'image' == vision_info['type']:
                 image_info.append(vision_info)
             elif 'depth' == vision_info['type']:
@@ -125,7 +126,7 @@ def process_vision_info_more(
             else:
                 raise ValueError("image, image_url or video should in content.")
     
-    n_frames = min(len(image_info), len(depth_info), len(norm_info), len(flow_info))
+    n_frames = min(len(image_info), len(depth_info), len(norm_info))
     # print(f"N FRAME: {n_frames}")
     indices = [i for i in range(n_frames)]
     if is_random:
@@ -156,7 +157,7 @@ def eval():
 
     lora_enable = training_args.lora_enable
     
-    processor, model = load_pretrained_model(model_base = model_args.model_id, model_path = model_args.model_path, 
+    processor, model = load_pretrained_sqa3d_model(model_base = model_args.model_id, model_path = model_args.model_path, 
                                                 device_map=training_args.device, model_name=model_args.model_path, 
                                                 load_4bit= training_args.bits==4,load_8bit=training_args.bits==8,
                                                 device=training_args.device, use_flash_attn=not training_args.disable_flash_attn2,
@@ -255,16 +256,16 @@ def eval():
             # print(pred)
             pred = pred.split('assistant')[-1][1:]
             pred = pred.split(' ')
-            print(pred)
+            print(pred, labels)
             # label_index = batch['labels'][0]
             # label_index = label_index[label_index!= -100]
-            label = labels.strip()
+            label = labels.split('<')[0].strip().lower()
             # print(label)
             
             qtype = qid.split('_')[0]
             
             a_label = label
-            a_pred = pred[0]
+            a_pred = pred[0].lower()
             inner_pred.append(a_pred)
         # print(a_label, inner_pred)
         # if all_acc
